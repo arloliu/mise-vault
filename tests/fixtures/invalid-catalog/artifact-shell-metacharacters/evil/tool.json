@@ -1,0 +1,7 @@
+{
+  "name": "evil",
+  "type": "archive",
+  "platforms": {
+    "linux-amd64": { "artifact": "evil'; touch pwned; '-{version}.tar.gz", "format": "tar.gz" }
+  }
+}

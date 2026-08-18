@@ -34,9 +34,14 @@ SHA256_RE = re.compile(r"\b([0-9a-f]{64})\b")
 def curl(args, **kw):
     import os
 
+    # --max-redirs 0: a redirect could send the request to a host other than
+    # the configured Nexus, so any redirect fails the transfer.
     extra = os.environ.get("NEXUS_CURL_OPTS", "").split()
+    base = ["curl", "-sS", "-n", "--retry", "2", "--max-redirs", "0"]
+    if kw.pop("follow", True):
+        base += ["-fL"]
     return subprocess.run(
-        ["curl", "-fsSL", "-n", "--retry", "2", *extra, *args],
+        [*base, *extra, *args],
         capture_output=True, text=kw.pop("text", True), **kw,
     )
 
@@ -48,8 +53,21 @@ def default_nexus_url():
     return None
 
 
-def artifact_exists(url):
-    return curl(["-I", "-o", "/dev/null", url]).returncode == 0
+def check_artifact(url):
+    """HEAD the URL; return None if it exists, otherwise a specific reason."""
+    r = curl(["-I", "-o", "/dev/null", "-w", "%{http_code}", url], follow=False)
+    if r.returncode != 0:
+        return f"unreachable (curl exit {r.returncode})"
+    code = (r.stdout or "").strip()[-3:]
+    if code == "200":
+        return None
+    if code in ("401", "403"):
+        return f"authentication failed (HTTP {code}) — check ~/.netrc or NEXUS_CURL_OPTS"
+    if code == "404":
+        return "not found in Nexus (HTTP 404)"
+    if code.startswith("3"):
+        return f"server redirected (HTTP {code}) — redirects are refused"
+    return f"unexpected HTTP {code}"
 
 
 def sha_from_sidecar(url):
@@ -115,8 +133,9 @@ def main():
         url = f"{args.nexus_url}/{args.tool}/{args.version}/{artifact}"
         print(f"{plat}: {artifact}")
 
-        if not artifact_exists(url):
-            sys.exit(f"error: artifact missing in Nexus: {url}")
+        reason = check_artifact(url)
+        if reason is not None:
+            sys.exit(f"error: artifact {reason}: {url}")
         print("  exists in Nexus")
 
         sha, suffix = sha_from_sidecar(url)

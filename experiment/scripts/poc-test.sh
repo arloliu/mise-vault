@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # mise-vault PoC test matrix: plugin behavior against the local Docker stack.
 # Runs entirely inside an isolated HOME so the real machine config is untouched.
+#
+# Structure:
+#   Phase 1 exercises the plugin LIFECYCLE (install / re-pin over git + netrc)
+#   using the pinned experiment tags v0.0.3 / v0.0.4.
+#   Phase 2 then links the CURRENT WORKING TREE as the plugin, so every
+#   behavior check from phase 3 on runs the exact code under review —
+#   the reviewed commit is printed and never hidden behind a stale tag.
+#
 # Requires: experiment stack up + provisioned + seeded; plugin repo tagged v0.0.3/v0.0.4.
 set -uo pipefail
 
 GITLAB=http://127.0.0.3:8929           # distinct loopback IPs => distinct netrc machines
 NEXUS=http://127.0.0.2:8081
 PLUGIN_URL="$GITLAB/devtools/mise-vault.git"
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 T=$(mktemp -d /tmp/mise-vault-poc.XXXXXX)
 PASS=0; FAIL=0
@@ -53,21 +62,36 @@ smoke = "vault:smoke"
 golangci-lint = "vault:golangci-lint[nexus_url=$NEXUS/repository/devtools]"
 TOML
 
-echo "== Phase 1: plugin install (netrc only, no token in URL, gix=false) =="
+echo "== Phase 1: plugin lifecycle over git (netrc, tags v0.0.3 -> v0.0.4) =="
 mise plugin install vault "$PLUGIN_URL#v0.0.3" >/dev/null 2>&1 \
   && ok "mise plugin install vault <url>#v0.0.3 via netrc" \
   || bad "mise plugin install vault <url>#v0.0.3 via netrc"
 mise plugins ls 2>/dev/null | grep -q vault && ok "plugin registered" || bad "plugin registered"
+mise ls-remote vault:smoke 2>/dev/null | grep -q . \
+  && bad "smoke must NOT be listed at v0.0.3" || ok "smoke absent at catalog v0.0.3"
+mise plugin install -f vault "$PLUGIN_URL#v0.0.4" >/dev/null 2>&1 \
+  && ok "plugin re-pin to v0.0.4 (catalog update)" || bad "plugin re-pin to v0.0.4"
+mise ls-remote smoke 2>/dev/null | grep -qx "0.0.1" \
+  && ok "new tool 'smoke' appears after catalog update" || bad "smoke not visible after update"
 
-echo "== Phase 2: version discovery (catalog only) =="
+echo "== Phase 2: link the working tree — everything below tests the code under review =="
+REVIEWED=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
+echo "  reviewed commit: $REVIEWED (plus any uncommitted changes in the working tree)"
+PLUG="$T/plugin"
+mkdir -p "$PLUG"
+cp -r "$REPO_ROOT/metadata.lua" "$REPO_ROOT/hooks" "$REPO_ROOT/lib" "$REPO_ROOT/config" "$REPO_ROOT/catalog" "$PLUG/"
+# fixtures: darwin-only (unsupported platform) and smoke (deliberately wrong sha256)
+cp -r "$REPO_ROOT/tests/fixtures/catalog/darwin-only" "$PLUG/catalog/"
+cp -r "$REPO_ROOT/tests/fixtures/catalog/smoke" "$PLUG/catalog/"
+mise plugins uninstall vault >/dev/null 2>&1
+mise plugins link vault "$PLUG" >/dev/null 2>&1 \
+  && ok "working tree linked as the vault plugin" || bad "linking working tree failed"
+
+echo "== Phase 3: version discovery + short-name aliases (catalog only) =="
 LSR=$(mise ls-remote vault:golangci-lint 2>/dev/null)
 [ "$(printf '%s\n' "$LSR" | tr '\n' ' ')" = "2.12.1 2.12.2 " ] \
   && ok "ls-remote vault:golangci-lint == exactly catalog (2.12.1 2.12.2)" \
   || bad "ls-remote vault:golangci-lint (got: $(echo $LSR))"
-mise ls-remote vault:smoke 2>/dev/null | grep -q . \
-  && bad "smoke must NOT be listed at v0.0.3" || ok "smoke absent at catalog v0.0.3"
-
-echo "== Phase 3: short-name aliases (conf.d) =="
 LSR2=$(mise ls-remote golangci-lint 2>/dev/null)
 [ "$(printf '%s\n' "$LSR2" | tr '\n' ' ')" = "2.12.1 2.12.2 " ] \
   && ok "ls-remote golangci-lint (short name) routed to vault backend" \
@@ -101,18 +125,60 @@ printf 'golang 1.26.6\ngolangci-lint 2.12.2\n' > "$PROJ/.tool-versions"
 echo "== Phase 6: fail-closed =="
 check_fail "unknown tool rejected (vault:foo)" mise install vault:foo@1.0.0
 check_fail "unapproved version rejected (golangci-lint@9.9.9)" mise install golangci-lint@9.9.9
-
-echo "== Phase 7: catalog update v0.0.3 -> v0.0.4 + checksum failure =="
-mise plugin install -f vault "$PLUGIN_URL#v0.0.4" >/dev/null 2>&1 \
-  && ok "plugin re-pin to v0.0.4 (catalog update)" || bad "plugin re-pin to v0.0.4"
-mise ls-remote smoke 2>/dev/null | grep -qx "0.0.1" \
-  && ok "new tool 'smoke' appears after catalog update" || bad "smoke not visible after update"
+OUT=$(mise install vault:darwin-only@1.0.0 2>&1)
+[ $? -ne 0 ] && echo "$OUT" | grep -q "not available for linux-amd64" \
+  && ok "darwin-only tool rejected: not available for linux-amd64" \
+  || bad "unsupported-platform handling (out: $(echo $OUT | head -c 150))"
 OUT=$(mise install smoke@0.0.1 2>&1)
 if [ $? -ne 0 ] && echo "$OUT" | grep -qi "sha-256\|sha256"; then
   ok "checksum mismatch aborts install with explicit error"
 else
   bad "checksum mismatch handling (exit=$?; out: $(echo $OUT | head -c 150))"
 fi
+
+echo "== Phase 7: redirect refusal + successful single-binary install =="
+# correct the smoke fixture's sha256 in the LINKED catalog so the only thing
+# standing between mise and a successful install is the transport policy
+REAL_SHA=$(curl -fsSn "$NEXUS/repository/devtools/smoke/0.0.1/smoke-0.0.1.txt" | sha256sum | awk '{print $1}')
+python3 - "$PLUG/catalog/smoke/versions.json" "$REAL_SHA" <<'PY'
+import json, sys
+path, sha = sys.argv[1], sys.argv[2]
+recs = json.load(open(path))
+recs[0]["platforms"]["linux-amd64"]["sha256"] = sha
+json.dump(recs, open(path, "w"), indent=2)
+PY
+# a server that answers every request with a redirect TO THE REAL NEXUS:
+# if the plugin followed redirects this install would succeed, so a failure
+# here proves redirects are refused, not merely that the target was down
+python3 - <<'PY' &
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def redirect(self):
+        self.send_response(302)
+        self.send_header("Location", "http://127.0.0.2:8081" + self.path)
+        self.end_headers()
+    do_GET = redirect
+    do_HEAD = redirect
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", 18082), H).serve_forever()
+PY
+REDIR_PID=$!
+trap 'kill $REDIR_PID 2>/dev/null' EXIT
+sleep 1
+sed -i 's|^smoke = .*|smoke = "vault:smoke[nexus_url=http://127.0.0.1:18082/repository/devtools]"|' \
+  "$T/.config/mise/conf.d/mise-vault.toml"
+OUT=$(mise install smoke@0.0.1 2>&1)
+if [ $? -ne 0 ] && echo "$OUT" | grep -qi "redirect\|unavailable\|could not be downloaded"; then
+  ok "redirect from the artifact server aborts the install (redirects refused)"
+else
+  bad "redirect handling (exit=$?; out: $(echo $OUT | head -c 200))"
+fi
+kill $REDIR_PID 2>/dev/null
+sed -i 's|^smoke = .*|smoke = "vault:smoke"|' "$T/.config/mise/conf.d/mise-vault.toml"
+check "install smoke@0.0.1 (single-binary format, correct sha256)" mise install smoke@0.0.1
+SMOKE_BIN=$(mise where smoke@0.0.1 2>/dev/null)/smoke
+[ -x "$SMOKE_BIN" ] && ok "binary installed executable at \$install_path/smoke" \
+  || bad "binary install layout (expected executable: $SMOKE_BIN)"
 
 echo "== Phase 8: auto-install behavior (fresh HOME, alias only, no plugin) =="
 T2=$(mktemp -d /tmp/mise-vault-poc2.XXXXXX)
@@ -128,28 +194,6 @@ else
   ok "EMPIRICAL ANSWER: alias to uninstalled plugin does NOT auto-install -> bootstrap must pre-install (log tail: $(tail -1 "$T/autoinstall.log" | head -c 120))"
 fi
 rm -rf "$T2"
-
-echo "== Phase 9: unsupported platform fails closed (linked plugin + fixture) =="
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-T3=$(mktemp -d /tmp/mise-vault-poc3.XXXXXX)
-PLUG="$T3/plugin"
-mkdir -p "$PLUG"
-cp -r "$REPO_ROOT/metadata.lua" "$REPO_ROOT/hooks" "$REPO_ROOT/lib" "$REPO_ROOT/config" "$REPO_ROOT/catalog" "$PLUG/"
-cp -r "$REPO_ROOT/tests/fixtures/catalog/darwin-only" "$PLUG/catalog/"
-HOME="$T3" bash -c '
-  mkdir -p "$HOME/.config/mise"
-  printf "[settings]\ngix = false\nlibgit2 = false\n" > "$HOME/.config/mise/config.toml"
-  mise plugins link vault "'"$PLUG"'" >/dev/null 2>&1
-  mise ls-remote vault:darwin-only 2>/dev/null | grep -qx 1.0.0 || exit 2
-  OUT=$(mise install vault:darwin-only@1.0.0 2>&1 || true)
-  echo "$OUT" | grep -q "not available for linux-amd64" || { echo "$OUT" | tail -2; exit 3; }
-'
-case $? in
-  0) ok "darwin-only tool listed, install rejected: not available for linux-amd64" ;;
-  2) bad "fixture tool not listed via linked plugin" ;;
-  *) bad "unsupported-platform error message wrong" ;;
-esac
-rm -rf "$T3"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed   (test HOME: $T — kept for inspection if failures)"

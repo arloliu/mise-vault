@@ -103,10 +103,12 @@ mise plugin install -f "$PLUGIN_NAME" "$PLUGIN_SPEC" \
 
 # --- 5. smoke test -------------------------------------------------------------
 FIRST_TOOL=$(ls -1 "$PLUGIN_DIR/catalog" | head -1)
-if mise ls-remote "$FIRST_TOOL" >/dev/null 2>&1; then
+# capture the output: a zero exit with an empty version list is still a failure
+SMOKE_VERSIONS=$(mise ls-remote "$FIRST_TOOL" 2>/dev/null)
+if [ -n "$SMOKE_VERSIONS" ]; then
     say "smoke test ok: 'mise ls-remote $FIRST_TOOL' lists approved versions"
 else
-    fail "smoke test failed: 'mise ls-remote $FIRST_TOOL' returned nothing"
+    fail "smoke test failed: 'mise ls-remote $FIRST_TOOL' listed no versions"
 fi
 
 say "done. Usage:"

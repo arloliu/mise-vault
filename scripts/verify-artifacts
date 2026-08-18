@@ -23,14 +23,36 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
-def curl(args, text=True):
+def curl(args, text=True, follow=False):
     import os
 
+    # --max-redirs 0: a redirect could send the request to a host other than
+    # the configured Nexus, so any redirect fails the transfer.
     extra = os.environ.get("NEXUS_CURL_OPTS", "").split()
+    base = ["curl", "-sS", "-n", "--retry", "2", "--max-redirs", "0"]
+    if follow:
+        base += ["-fL"]
     return subprocess.run(
-        ["curl", "-fsSL", "-n", "--retry", "2", *extra, *args],
+        [*base, *extra, *args],
         capture_output=True, text=text,
     )
+
+
+def probe(url):
+    """HEAD the URL and classify the outcome; None means the artifact exists."""
+    r = curl(["-I", "-o", "/dev/null", "-w", "%{http_code}", url])
+    if r.returncode != 0:
+        return f"unreachable (curl exit {r.returncode})"
+    code = (r.stdout or "").strip()[-3:]
+    if code == "200":
+        return None
+    if code in ("401", "403"):
+        return f"authentication failed (HTTP {code}) — check ~/.netrc or NEXUS_CURL_OPTS"
+    if code == "404":
+        return "not found in Nexus (HTTP 404)"
+    if code.startswith("3"):
+        return f"server redirected (HTTP {code}) — redirects are refused"
+    return f"unexpected HTTP {code}"
 
 
 def main():
@@ -51,6 +73,11 @@ def main():
     failures = 0
     checked = 0
     catalog = Path(args.catalog_dir)
+    if args.tool:
+        known = {p.name for p in catalog.iterdir() if p.is_dir()}
+        unknown = sorted(set(args.tool) - known)
+        if unknown:
+            sys.exit(f"error: unknown tool(s): {', '.join(unknown)} (not in {catalog})")
     for tool_dir in sorted(p for p in catalog.iterdir() if p.is_dir()):
         tool_name = tool_dir.name
         if args.tool and tool_name not in args.tool:
@@ -62,15 +89,16 @@ def main():
                 artifact = tool["platforms"][plat]["artifact"].replace("{version}", rec["version"])
                 url = f"{nexus}/{tool_name}/{rec['version']}/{artifact}"
                 checked += 1
-                if curl(["-I", "-o", "/dev/null", url]).returncode != 0:
-                    print(f"FAIL missing: {url}")
+                reason = probe(url)
+                if reason is not None:
+                    print(f"FAIL {reason}: {url}")
                     failures += 1
                     continue
                 if not args.checksum:
                     print(f"ok   exists:  {tool_name} {rec['version']} {plat}")
                     continue
                 with tempfile.NamedTemporaryFile() as tmp:
-                    if curl(["-o", tmp.name, url], text=False).returncode != 0:
+                    if curl(["-o", tmp.name, url], text=False, follow=True).returncode != 0:
                         print(f"FAIL download: {url}")
                         failures += 1
                         continue
@@ -86,6 +114,9 @@ def main():
                         print(f"ok   sha256:  {tool_name} {rec['version']} {plat}")
 
     mode = "existence+checksum" if args.checksum else "existence"
+    if checked == 0:
+        print("verify-artifacts: FAILED — the selection matched no artifacts", file=sys.stderr)
+        return 1
     if failures:
         print(f"verify-artifacts: {failures}/{checked} FAILED [{mode}]", file=sys.stderr)
         return 1

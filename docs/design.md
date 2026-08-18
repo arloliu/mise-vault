@@ -589,19 +589,19 @@ Adding a normal version appends one record — a small, reviewable, append-only 
 For example:
 
 ```diff
- {
-   "2.4.0": {
-     ...
+ [
+   {
+     "version": "2.4.0",
+     "platforms": { ... }
 +  },
-+  "2.4.1": {
-+    "linux-amd64": {
-+      "sha256": "..."
-+    },
-+    "linux-arm64": {
-+      "sha256": "..."
++  {
++    "version": "2.4.1",
++    "platforms": {
++      "linux-amd64": { "sha256": "..." },
++      "linux-arm64": { "sha256": "..." }
 +    }
    }
- }
+ ]
 ```
 
 This is desirable because the catalog MR itself becomes part of the approval process.
@@ -725,7 +725,9 @@ catalog/golangci-lint/versions.json
        Parse versions
             |
             v
-       Semantic sort
+Return catalog order verbatim
+   (the array is already
+  oldest-approved first)
             |
             v
 2.4.0

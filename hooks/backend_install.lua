@@ -28,14 +28,25 @@ function PLUGIN:BackendInstall(ctx)
     end
 
     -- 3. construct Nexus URL (never any other host)
+    -- The rendered artifact must be a plain file name: no path separators,
+    -- no shell metacharacters, not a dot-only name.
+    -- Anything else could move the download destination or alter the download command.
     local artifact = common.render(pconf.artifact, { version = ctx.version })
+    if artifact:match("^[%w%._%+%-]+$") == nil or artifact:match("^%.+$") ~= nil then
+        error("catalog artifact for " .. ctx.tool .. " is not a plain file name: " .. artifact)
+    end
     local url = common.nexus_base(ctx.options) .. "/" .. ctx.tool .. "/" .. ctx.version .. "/" .. artifact
 
     -- 4. download via curl (rides ~/.netrc with -n; Lua http module has no netrc support)
+    -- --max-redirs 0: a redirect could send the request to a host other than
+    -- the configured Nexus, so any redirect aborts the download.
+    local q = common.shell_quote
     local dest = file.join_path(ctx.download_path, artifact)
-    local dl = cmd.exec("curl -fsSL -n --retry 2 -o '" .. dest .. "' '" .. url .. "' && echo CURL_OK")
+    local dl = cmd.exec("curl -fsSL --max-redirs 0 -n --retry 2 -o " .. q(dest) .. " " .. q(url) ..
+                        " && echo CURL_OK")
     if not strings.contains(dl, "CURL_OK") then
-        error("approved Nexus artifact is unavailable: " .. url)
+        error("approved Nexus artifact could not be downloaded" ..
+              " (server error, or a redirect, which is refused): " .. url)
     end
 
     -- 5. mandatory SHA-256 verification
@@ -43,7 +54,7 @@ function PLUGIN:BackendInstall(ctx)
     if RUNTIME.osType == "darwin" then
         hasher = "shasum -a 256"
     end
-    local out = cmd.exec(hasher .. " '" .. dest .. "'")
+    local out = cmd.exec(hasher .. " " .. q(dest))
     local got = strings.split(strings.trim_space(out), " ")[1]
     if got ~= psha.sha256 then
         error("SHA-256 verification failed for " .. artifact ..
@@ -54,8 +65,8 @@ function PLUGIN:BackendInstall(ctx)
     local strip = pconf.strip_components or 0
     if pconf.format == "binary" then
         local target = file.join_path(ctx.install_path, ctx.tool)
-        cmd.exec("mkdir -p '" .. ctx.install_path .. "' && cp '" .. dest .. "' '" .. target ..
-                 "' && chmod +x '" .. target .. "'")
+        cmd.exec("mkdir -p " .. q(ctx.install_path) .. " && cp " .. q(dest) .. " " .. q(target) ..
+                 " && chmod +x " .. q(target))
     else
         archiver.decompress(dest, ctx.install_path, { strip_components = strip })
     end

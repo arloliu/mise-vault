@@ -159,9 +159,11 @@ docker compose up -d
 Test suites (each runs in an isolated throwaway `$HOME`; the real machine config is never touched):
 
 ```bash
-./experiment/scripts/poc-test.sh          # plugin behavior matrix against the local stack
-./experiment/scripts/bootstrap-test.sh    # full new-developer bootstrap flow
+./experiment/scripts/poc-test.sh          # plugin behavior matrix; links the WORKING TREE as the plugin
+./experiment/scripts/bootstrap-test.sh    # full bootstrap flow; asserts experiment GitLab serves local HEAD
+./experiment/scripts/offline-test.sh      # release gate: everything inside a no-internet network
 scripts/validate-catalog                  # catalog static validation (no network)
+tests/run-validator-tests                 # validator must REJECT unsafe catalog shapes (no network)
 scripts/verify-artifacts [--checksum]     # catalog vs Nexus (network)
 ```
 

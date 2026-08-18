@@ -27,15 +27,20 @@
           "properties": {
             "artifact": {
               "type": "string",
-              "pattern": "\\{version\\}",
-              "description": "Artifact file name template; only {version} is substituted — each platform spells out its own full name, nothing is inferred from os/arch"
+              "pattern": "^[A-Za-z0-9._+-]*\\{version\\}[A-Za-z0-9._+-]*$",
+              "description": "Artifact file name template; only {version} is substituted — each platform spells out its own full name, nothing is inferred from os/arch. Must be a plain file name: no path separators or shell metacharacters"
             },
             "format": { "enum": ["tar.gz", "tar.xz", "tar.bz2", "zip", "binary"] },
             "strip_components": { "type": "integer", "minimum": 0, "maximum": 3 },
             "bin_paths": {
               "type": "array",
               "minItems": 1,
-              "items": { "type": "string", "minLength": 1 }
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9._+/-]+$",
+                "description": "Relative path inside the install directory; never absolute, never containing '..'"
+              }
             }
           }
         }

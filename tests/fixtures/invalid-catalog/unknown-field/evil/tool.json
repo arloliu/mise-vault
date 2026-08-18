@@ -1,0 +1,6 @@
+{
+  "name": "evil",
+  "type": "archive",
+  "homepage": "https://example.com",
+  "platforms": { "linux-amd64": { "artifact": "evil-{version}.tar.gz", "format": "tar.gz" } }
+}

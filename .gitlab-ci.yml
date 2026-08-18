@@ -24,6 +24,8 @@ validate-catalog:
   script:
     - pip install --quiet jsonschema        # formal schema engine in CI
     - scripts/validate-catalog
+    # the validator must also provably REJECT unsafe catalog shapes
+    - tests/run-validator-tests
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

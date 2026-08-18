@@ -9,9 +9,11 @@ Schemas in schemas/ plus cross-file rules the schemas cannot express:
   - every platform in a version record must be declared in tool.json
   - purely numeric version schemes must be in ascending order
     (non-numeric schemes skip the order check; order is still authoritative)
+  - artifact templates must be plain file names (no path separators or
+    shell metacharacters); bin paths must be relative and free of '..'
 
-Uses the `jsonschema` package when available (CI); otherwise falls back to
-built-in structural checks implementing the same rules (dep-free local runs).
+The dep-free built-in checks always run; when the `jsonschema` package is
+available (CI), the formal schemas in schemas/ are validated on top of them.
 
 Usage: scripts/validate-catalog [--catalog-dir DIR]
 Exit code 0 = valid, 1 = violations found.
@@ -29,6 +31,12 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]*$")
 NUMERIC_RE = re.compile(r"^\d+(\.\d+)*$")
 FORMATS = {"tar.gz", "tar.xz", "tar.bz2", "zip", "binary"}
+# An artifact template is a plain file name: no path separators, no shell
+# metacharacters. It renders into download commands and file paths.
+ARTIFACT_RE = re.compile(r"^[A-Za-z0-9._+{}-]+$")
+# A bin path is relative, never escapes the install directory, and contains
+# no shell metacharacters.
+BIN_PATH_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
 
 errors = []
 
@@ -79,8 +87,13 @@ def builtin_validate_tool(tool, path):
         unknown = set(pconf) - {"artifact", "format", "strip_components", "bin_paths"}
         if unknown:
             err(path, f"{plat}: unknown fields: {sorted(unknown)}")
-        if "artifact" in pconf and "{version}" not in pconf["artifact"]:
-            err(path, f"{plat}: artifact template must contain {{version}}")
+        if "artifact" in pconf:
+            a = str(pconf["artifact"])
+            if "{version}" not in a:
+                err(path, f"{plat}: artifact template must contain {{version}}")
+            if not ARTIFACT_RE.match(a):
+                err(path, f"{plat}: artifact must be a plain file name "
+                          f"(letters, digits, . _ + - and {{version}} only): {a!r}")
         if "format" in pconf and pconf["format"] not in FORMATS:
             err(path, f"{plat}: invalid format: {pconf['format']!r}")
         sc = pconf.get("strip_components", 0)
@@ -89,6 +102,11 @@ def builtin_validate_tool(tool, path):
         bp = pconf.get("bin_paths", ["."])
         if not isinstance(bp, list) or not bp or not all(isinstance(b, str) and b for b in bp):
             err(path, f"{plat}: bin_paths must be a non-empty list of strings")
+        else:
+            for b in bp:
+                if b.startswith("/") or ".." in b or not BIN_PATH_RE.match(b):
+                    err(path, f"{plat}: bin path must be relative, must not contain '..', "
+                              f"and may use only letters, digits, . _ + - /: {b!r}")
     env = tool.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         err(path, "env must be an object of string values")
@@ -175,16 +193,18 @@ def main():
         versions = load(tool_dir / "versions.json")
         if tool is None or versions is None:
             continue
+        # The built-in checks always run; the formal schema engine runs on top
+        # of them when available, so the two rule sets cannot drift apart
+        # unnoticed.
+        builtin_validate_tool(tool, tool_dir / "tool.json")
+        builtin_validate_versions(versions, tool_dir / "versions.json")
         if have_jsonschema:
             jsonschema_validate(tool, "tool.schema.json", tool_dir / "tool.json")
             jsonschema_validate(versions, "versions.schema.json", tool_dir / "versions.json")
-        else:
-            builtin_validate_tool(tool, tool_dir / "tool.json")
-            builtin_validate_versions(versions, tool_dir / "versions.json")
         if isinstance(tool, dict) and isinstance(versions, list):
             cross_checks(tool_dir, tool, versions)
 
-    engine = "jsonschema" if have_jsonschema else "built-in checks"
+    engine = "built-in + jsonschema" if have_jsonschema else "built-in checks"
     if errors:
         print(f"validate-catalog: {len(errors)} violation(s) [{engine}]:", file=sys.stderr)
         for e in errors:

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Validator rejection tests: the catalog is the security boundary, so the
+# validator must provably reject unsafe or malformed catalog entries, not
+# only accept the good ones.
+#
+#   1. the real catalog must validate
+#   2. every case under tests/fixtures/invalid-catalog/<case>/ must be rejected
+#
+# The built-in checks always run inside validate-catalog; when the jsonschema
+# package is installed (as in CI) the formal schemas run on top. A fixture
+# that one engine accepts while the other rejects still fails this suite,
+# which is what keeps the two rule sets from drifting apart.
+#
+# No network needed. Exit 0 = all good, 1 = any failure.
+set -uo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+VALIDATE="$ROOT/scripts/validate-catalog"
+PASS=0; FAIL=0
+ok()  { PASS=$((PASS+1)); printf '  PASS  %s\n' "$1"; }
+bad() { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1"; }
+
+if "$VALIDATE" >/dev/null 2>&1; then
+  ok "real catalog accepted"
+else
+  bad "real catalog must validate cleanly"
+fi
+
+for case_dir in "$ROOT"/tests/fixtures/invalid-catalog/*/; do
+  name=$(basename "$case_dir")
+  OUT=$("$VALIDATE" --catalog-dir "$case_dir" 2>&1)
+  if [ $? -ne 0 ]; then
+    ok "rejected: $name"
+  else
+    bad "NOT rejected: $name (validator output: $(echo "$OUT" | head -1))"
+  fi
+done
+
+echo "run-validator-tests: $PASS passed, $FAIL failed"
+exit $([ "$FAIL" = 0 ] && echo 0 || echo 1)

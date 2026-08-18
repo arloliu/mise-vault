@@ -1,0 +1,7 @@
+{
+  "name": "evil",
+  "type": "archive",
+  "platforms": {
+    "linux-amd64": { "artifact": "static-name.tar.gz", "format": "tar.gz" }
+  }
+}
