@@ -28,12 +28,14 @@ def curl(args, text=True, follow=False):
 
     # --max-redirs 0: a redirect could send the request to a host other than
     # the configured Nexus, so any redirect fails the transfer.
+    # The confinement flags come AFTER $NEXUS_CURL_OPTS so a caller-supplied
+    # option can never weaken them.
     extra = os.environ.get("NEXUS_CURL_OPTS", "").split()
-    base = ["curl", "-sS", "-n", "--retry", "2", "--max-redirs", "0"]
+    base = ["curl", "-sS", "-n", "--retry", "2", *extra, "--max-redirs", "0"]
     if follow:
         base += ["-fL"]
     return subprocess.run(
-        [*base, *extra, *args],
+        [*base, *args],
         capture_output=True, text=text,
     )
 
@@ -98,8 +100,11 @@ def main():
                     print(f"ok   exists:  {tool_name} {rec['version']} {plat}")
                     continue
                 with tempfile.NamedTemporaryFile() as tmp:
-                    if curl(["-o", tmp.name, url], text=False, follow=True).returncode != 0:
-                        print(f"FAIL download: {url}")
+                    r = curl(["-o", tmp.name, url], text=False, follow=True)
+                    if r.returncode != 0:
+                        detail = (r.stderr or b"").decode(errors="replace").strip().splitlines()
+                        cause = detail[0] if detail else f"curl exit {r.returncode}"
+                        print(f"FAIL download ({cause}): {url}")
                         failures += 1
                         continue
                     h = hashlib.sha256()

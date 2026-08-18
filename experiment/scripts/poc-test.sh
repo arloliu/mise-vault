@@ -149,11 +149,19 @@ json.dump(recs, open(path, "w"), indent=2)
 PY
 # a server that answers every request with a redirect TO THE REAL NEXUS:
 # if the plugin followed redirects this install would succeed, so a failure
-# here proves redirects are refused, not merely that the target was down
-python3 - <<'PY' &
+# here proves redirects are refused, not merely that the target was down.
+# Every request path is appended to a log so the test can prove the plugin
+# actually reached this server before it failed.
+REDIR_LOG="$T/redirect-requests.log"
+: > "$REDIR_LOG"
+python3 - "$REDIR_LOG" <<'PY' &
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+log_path = sys.argv[1]
 class H(BaseHTTPRequestHandler):
     def redirect(self):
+        with open(log_path, "a") as f:
+            f.write(self.path + "\n")
         self.send_response(302)
         self.send_header("Location", "http://127.0.0.2:8081" + self.path)
         self.end_headers()
@@ -164,14 +172,25 @@ HTTPServer(("127.0.0.1", 18082), H).serve_forever()
 PY
 REDIR_PID=$!
 trap 'kill $REDIR_PID 2>/dev/null' EXIT
-sleep 1
+# readiness handshake: the server must answer 302 before the test proceeds
+READY=""
+for _ in $(seq 1 40); do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/ready 2>/dev/null)
+  [ "$CODE" = "302" ] && READY=yes && break
+  sleep 0.25
+done
+[ -n "$READY" ] && ok "redirect server is up and answering 302" \
+  || bad "redirect server did not come up on 127.0.0.1:18082"
 sed -i 's|^smoke = .*|smoke = "vault:smoke[nexus_url=http://127.0.0.1:18082/repository/devtools]"|' \
   "$T/.config/mise/conf.d/mise-vault.toml"
 OUT=$(mise install smoke@0.0.1 2>&1)
-if [ $? -ne 0 ] && echo "$OUT" | grep -qi "redirect\|unavailable\|could not be downloaded"; then
-  ok "redirect from the artifact server aborts the install (redirects refused)"
+INSTALL_EXIT=$?
+if [ $INSTALL_EXIT -ne 0 ] \
+  && grep -q "smoke-0.0.1.txt" "$REDIR_LOG" \
+  && echo "$OUT" | grep -qi "redirect\|unavailable\|could not be downloaded"; then
+  ok "redirect from the artifact server aborts the install (request logged, redirect refused)"
 else
-  bad "redirect handling (exit=$?; out: $(echo $OUT | head -c 200))"
+  bad "redirect handling (exit=$INSTALL_EXIT; server saw: $(tr '\n' ' ' < "$REDIR_LOG" | head -c 120); out: $(echo $OUT | head -c 200))"
 fi
 kill $REDIR_PID 2>/dev/null
 sed -i 's|^smoke = .*|smoke = "vault:smoke"|' "$T/.config/mise/conf.d/mise-vault.toml"

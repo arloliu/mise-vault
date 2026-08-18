@@ -4,18 +4,26 @@
 # only accept the good ones.
 #
 #   1. the real catalog must validate
-#   2. every case under tests/fixtures/invalid-catalog/<case>/ must be rejected
-#
-# The built-in checks always run inside validate-catalog; when the jsonschema
-# package is installed (as in CI) the formal schemas run on top. A fixture
-# that one engine accepts while the other rejects still fails this suite,
-# which is what keeps the two rule sets from drifting apart.
+#   2. every case under tests/fixtures/invalid-catalog/<case>/ must be
+#      rejected by the built-in engine (always available, no dependencies)
+#   3. when the jsonschema package is installed (as in CI), the cases a
+#      formal schema can express must ALSO be rejected by the schemas ALONE
+#      (--engine schema) — this is what keeps the two rule sets from
+#      drifting apart: a schema gap fails here even though the built-in
+#      engine would still have caught the bad entry
 #
 # No network needed. Exit 0 = all good, 1 = any failure.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VALIDATE="$ROOT/scripts/validate-catalog"
+FIXTURES="$ROOT/tests/fixtures/invalid-catalog"
+# cases a formal JSON Schema can express on its own (single-file shape rules);
+# the rest are cross-file rules that only the built-in/cross checks cover
+SCHEMA_CASES="artifact-traversal artifact-shell-metacharacters artifact-missing-version
+              bin-path-absolute bin-path-traversal bad-sha256 unknown-field invalid-format"
+MIN_CASES=12
+
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); printf '  PASS  %s\n' "$1"; }
 bad() { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1"; }
@@ -26,15 +34,37 @@ else
   bad "real catalog must validate cleanly"
 fi
 
-for case_dir in "$ROOT"/tests/fixtures/invalid-catalog/*/; do
+# a vanished fixture directory must fail the suite, not silently skip it
+CASES=$(find "$FIXTURES" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+COUNT=$(echo "$CASES" | grep -c . || true)
+if [ "$COUNT" -ge "$MIN_CASES" ]; then
+  ok "fixture matrix present ($COUNT cases, expected >= $MIN_CASES)"
+else
+  bad "fixture matrix missing or truncated ($COUNT cases found under $FIXTURES, expected >= $MIN_CASES)"
+fi
+
+for case_dir in $CASES; do
   name=$(basename "$case_dir")
-  OUT=$("$VALIDATE" --catalog-dir "$case_dir" 2>&1)
+  OUT=$("$VALIDATE" --engine builtin --catalog-dir "$case_dir" 2>&1)
   if [ $? -ne 0 ]; then
-    ok "rejected: $name"
+    ok "built-in engine rejects: $name"
   else
-    bad "NOT rejected: $name (validator output: $(echo "$OUT" | head -1))"
+    bad "built-in engine did NOT reject: $name (output: $(echo "$OUT" | head -1))"
   fi
 done
+
+if python3 -c "import jsonschema" 2>/dev/null; then
+  for name in $SCHEMA_CASES; do
+    OUT=$("$VALIDATE" --engine schema --catalog-dir "$FIXTURES/$name" 2>&1)
+    if [ $? -ne 0 ]; then
+      ok "schemas alone reject: $name"
+    else
+      bad "schemas alone did NOT reject: $name — schemas/ has drifted behind the built-in rules (output: $(echo "$OUT" | head -1))"
+    fi
+  done
+else
+  echo "  NOTE  jsonschema not installed — schema-only passes skipped (CI runs them)"
+fi
 
 echo "run-validator-tests: $PASS passed, $FAIL failed"
 exit $([ "$FAIL" = 0 ] && echo 0 || echo 1)

@@ -171,6 +171,12 @@ def cross_checks(tool_dir, tool, versions):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--catalog-dir", default=str(REPO / "catalog"))
+    ap.add_argument("--engine", choices=["both", "builtin", "schema"], default="both",
+                    help="both (default): built-in checks plus the formal schemas when "
+                         "the jsonschema package is available; builtin: built-in checks "
+                         "only; schema: formal schemas ONLY (no built-in, no cross-file "
+                         "rules) — used by the test suite to prove the schemas reject "
+                         "unsafe shapes on their own")
     args = ap.parse_args()
     catalog = Path(args.catalog_dir)
     if not catalog.is_dir():
@@ -182,6 +188,11 @@ def main():
         have_jsonschema = True
     except ImportError:
         have_jsonschema = False
+    if args.engine == "schema" and not have_jsonschema:
+        print("error: --engine schema requires the jsonschema package", file=sys.stderr)
+        return 1
+    use_builtin = args.engine in ("both", "builtin")
+    use_schema = args.engine in ("both", "schema") and have_jsonschema
 
     tool_dirs = sorted(p for p in catalog.iterdir() if p.is_dir())
     if not tool_dirs:
@@ -193,18 +204,25 @@ def main():
         versions = load(tool_dir / "versions.json")
         if tool is None or versions is None:
             continue
-        # The built-in checks always run; the formal schema engine runs on top
-        # of them when available, so the two rule sets cannot drift apart
-        # unnoticed.
-        builtin_validate_tool(tool, tool_dir / "tool.json")
-        builtin_validate_versions(versions, tool_dir / "versions.json")
-        if have_jsonschema:
+        # Default engine "both": the built-in checks always run and the formal
+        # schemas run on top when available, so the two rule sets cannot drift
+        # apart unnoticed. Engine "schema" isolates the schemas (no built-in,
+        # no cross-file rules) so the test suite can prove them independently.
+        if use_builtin:
+            builtin_validate_tool(tool, tool_dir / "tool.json")
+            builtin_validate_versions(versions, tool_dir / "versions.json")
+        if use_schema:
             jsonschema_validate(tool, "tool.schema.json", tool_dir / "tool.json")
             jsonschema_validate(versions, "versions.schema.json", tool_dir / "versions.json")
-        if isinstance(tool, dict) and isinstance(versions, list):
+        if args.engine != "schema" and isinstance(tool, dict) and isinstance(versions, list):
             cross_checks(tool_dir, tool, versions)
 
-    engine = "built-in + jsonschema" if have_jsonschema else "built-in checks"
+    if args.engine == "schema":
+        engine = "jsonschema only"
+    elif use_schema:
+        engine = "built-in + jsonschema"
+    else:
+        engine = "built-in checks"
     if errors:
         print(f"validate-catalog: {len(errors)} violation(s) [{engine}]:", file=sys.stderr)
         for e in errors:

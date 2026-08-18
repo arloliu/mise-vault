@@ -36,12 +36,14 @@ def curl(args, **kw):
 
     # --max-redirs 0: a redirect could send the request to a host other than
     # the configured Nexus, so any redirect fails the transfer.
+    # The confinement flags come AFTER $NEXUS_CURL_OPTS so a caller-supplied
+    # option can never weaken them.
     extra = os.environ.get("NEXUS_CURL_OPTS", "").split()
-    base = ["curl", "-sS", "-n", "--retry", "2", "--max-redirs", "0"]
+    base = ["curl", "-sS", "-n", "--retry", "2", *extra, "--max-redirs", "0"]
     if kw.pop("follow", True):
         base += ["-fL"]
     return subprocess.run(
-        [*base, *extra, *args],
+        [*base, *args],
         capture_output=True, text=kw.pop("text", True), **kw,
     )
 
@@ -82,16 +84,23 @@ def sha_from_sidecar(url):
     return None, None
 
 
+def curl_error(r):
+    """One-line cause for a failed curl run (curl -sS prints errors to stderr)."""
+    detail = r.stderr if isinstance(r.stderr, str) else (r.stderr or b"").decode(errors="replace")
+    lines = detail.strip().splitlines()
+    return lines[0] if lines else f"curl exit {r.returncode}"
+
+
 def sha_by_download(url):
     with tempfile.NamedTemporaryFile() as tmp:
         r = curl(["-o", tmp.name, url], text=False)
         if r.returncode != 0:
-            return None
+            return None, curl_error(r)
         h = hashlib.sha256()
         with open(tmp.name, "rb") as fh:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
-        return h.hexdigest()
+        return h.hexdigest(), None
 
 
 def main():
@@ -143,9 +152,9 @@ def main():
             print(f"  sha256 from sidecar {suffix}: {sha}")
         else:
             print("  no sidecar — downloading to hash locally ...")
-            sha = sha_by_download(url)
+            sha, cause = sha_by_download(url)
             if not sha:
-                sys.exit(f"error: could not download {url} to compute sha256")
+                sys.exit(f"error: could not download {url} to compute sha256 ({cause})")
             print(f"  sha256 computed: {sha}")
         record["platforms"][plat] = {"sha256": sha}
 
