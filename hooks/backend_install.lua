@@ -42,8 +42,12 @@ function PLUGIN:BackendInstall(ctx)
     -- the configured Nexus, so any redirect aborts the download.
     local q = common.shell_quote
     local dest = file.join_path(ctx.download_path, artifact)
+    -- `|| true` keeps the shell exit at zero: cmd.exec raises on a nonzero
+    -- exit with a generic message, and the specific error below must win.
+    -- On failure the captured output is curl's own error (stderr, via 2>&1)
+    -- and the CURL_OK marker is absent.
     local dl = cmd.exec("curl -fsSL --max-redirs 0 -n --retry 2 -o " .. q(dest) .. " " .. q(url) ..
-                        " 2>&1 && echo CURL_OK")
+                        " 2>&1 && echo CURL_OK || true")
     if not strings.contains(dl, "CURL_OK") then
         local detail = strings.split(strings.trim_space(dl), "\n")[1] or ""
         if detail ~= "" then
