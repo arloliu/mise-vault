@@ -27,7 +27,10 @@ def curl(args, text=True, follow=False):
     import os
 
     # --max-redirs 0: a redirect could send the request to a host other than
-    # the configured Nexus, so any redirect fails the transfer.
+    # the configured Nexus, so any redirect fails the transfer. -L is kept
+    # deliberately: without it a redirect response would count as success
+    # (curl -f only fails on 4xx/5xx); with -L plus a zero limit, any
+    # redirect becomes a hard curl error instead.
     # The confinement flags come AFTER $NEXUS_CURL_OPTS so a caller-supplied
     # option can never weaken them.
     extra = os.environ.get("NEXUS_CURL_OPTS", "").split()
@@ -84,8 +87,11 @@ def main():
         tool_name = tool_dir.name
         if args.tool and tool_name not in args.tool:
             continue
-        tool = json.loads((tool_dir / "tool.json").read_text())
-        versions = json.loads((tool_dir / "versions.json").read_text())
+        try:
+            tool = json.loads((tool_dir / "tool.json").read_text())
+            versions = json.loads((tool_dir / "versions.json").read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            sys.exit(f"error: unreadable or invalid catalog file under {tool_dir}: {e}")
         for rec in versions:
             for plat, pdata in rec["platforms"].items():
                 artifact = tool["platforms"][plat]["artifact"].replace("{version}", rec["version"])

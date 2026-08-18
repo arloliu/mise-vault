@@ -16,11 +16,17 @@ function M.platform()
     return RUNTIME.osType .. "-" .. RUNTIME.archType
 end
 
+--- nil means the file does not exist; a file that exists but is not valid
+--- JSON raises a specific error instead of being mistaken for a missing tool.
 local function read_json(path)
     if not file.exists(path) then
         return nil
     end
-    return json.decode(file.read(path))
+    local ok, decoded = pcall(json.decode, file.read(path))
+    if not ok then
+        error("catalog file is not valid JSON: " .. path)
+    end
+    return decoded
 end
 
 --- Quote one value for safe use inside a shell command string.

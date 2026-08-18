@@ -35,7 +35,10 @@ def curl(args, **kw):
     import os
 
     # --max-redirs 0: a redirect could send the request to a host other than
-    # the configured Nexus, so any redirect fails the transfer.
+    # the configured Nexus, so any redirect fails the transfer. -L is kept
+    # deliberately: without it a redirect response would count as success
+    # (curl -f only fails on 4xx/5xx); with -L plus a zero limit, any
+    # redirect becomes a hard curl error instead.
     # The confinement flags come AFTER $NEXUS_CURL_OPTS so a caller-supplied
     # option can never weaken them.
     extra = os.environ.get("NEXUS_CURL_OPTS", "").split()
@@ -181,7 +184,8 @@ def main():
         return
     versions_file.write_text(rendered)
     print(f"\nappended {args.tool} {args.version} to {versions_file}")
-    print("next: run scripts/validate-catalog, then open the catalog MR")
+    print(f"next: run scripts/validate-catalog and "
+          f"scripts/verify-artifacts --checksum --tool {args.tool}, then open the catalog MR")
 
 
 if __name__ == "__main__":

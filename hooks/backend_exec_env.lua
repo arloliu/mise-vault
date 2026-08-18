@@ -24,10 +24,17 @@ function PLUGIN:BackendExecEnv(ctx)
     end
     table.insert(env_vars, { key = "PATH", value = table.concat(rendered, ":") })
 
-    for k, template in pairs(tool.env or {}) do
+    -- sort the keys so the emitted list is deterministic (pairs() order is not)
+    local env = tool.env or {}
+    local keys = {}
+    for k in pairs(env) do
+        table.insert(keys, k)
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
         table.insert(env_vars, {
             key = k,
-            value = common.render(template, { install_path = ctx.install_path, version = ctx.version }),
+            value = common.render(env[k], { install_path = ctx.install_path, version = ctx.version }),
         })
     end
 

@@ -35,8 +35,10 @@ if [ -n "$REF" ]; then
 fi
 
 # --- sanity: the plugin checkout must carry a usable Nexus URL --------------
+# stderr silenced: on failure the line below prints the one intended message
+# instead of a raw Python traceback
 python3 -c "import json,sys; json.load(open(sys.argv[1]))['nexus_url']" \
-    "$PLUGIN_DIR/config/defaults.json" \
+    "$PLUGIN_DIR/config/defaults.json" 2>/dev/null \
     || { echo "vault-sync: broken plugin checkout: config/defaults.json unusable" >&2; exit 1; }
 
 TOOLS=$(cd "$PLUGIN_DIR/catalog" && ls -1d */ | tr -d /)

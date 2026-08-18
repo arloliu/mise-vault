@@ -43,10 +43,15 @@ function PLUGIN:BackendInstall(ctx)
     local q = common.shell_quote
     local dest = file.join_path(ctx.download_path, artifact)
     local dl = cmd.exec("curl -fsSL --max-redirs 0 -n --retry 2 -o " .. q(dest) .. " " .. q(url) ..
-                        " && echo CURL_OK")
+                        " 2>&1 && echo CURL_OK")
     if not strings.contains(dl, "CURL_OK") then
+        local detail = strings.split(strings.trim_space(dl), "\n")[1] or ""
+        if detail ~= "" then
+            detail = " — " .. detail
+        end
         error("approved Nexus artifact could not be downloaded" ..
-              " (server error, or a redirect, which is refused): " .. url)
+              " (server error, or a redirect, which is refused): " .. url .. detail ..
+              " (authentication rides ~/.netrc for the Nexus host)")
     end
 
     -- 5. mandatory SHA-256 verification
