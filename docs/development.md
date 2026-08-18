@@ -92,15 +92,27 @@ git tag v0.0.X && git push experiment v0.0.X
 
 | Suite | Covers | Runtime |
 |---|---|---|
-| `experiment/scripts/poc-test.sh` | plugin behavior matrix: discovery, installs (archive/runtime), aliases, `.tool-versions`, fail-closed paths, catalog update, unsupported platform | ~2 min |
+| `experiment/scripts/poc-test.sh` | plugin behavior matrix: discovery, installs (archive/runtime/binary), aliases, `.tool-versions`, fail-closed paths, redirect refusal, catalog update, unsupported platform | ~2 min |
 | `experiment/scripts/bootstrap-test.sh` | the full new-developer flow: netrc clone, `install.sh` self-detection, generated config, public-backend blocking, idempotency, `vault-sync` | ~2 min |
-| `experiment/scripts/offline-test.sh` | everything again inside a Docker network with **no route to the internet** | ~2 min |
+| `experiment/scripts/offline-test.sh` | everything again inside a Docker network with **no route to the internet** — the release gate: run it before tagging a release | ~2 min |
 | `scripts/validate-catalog` | catalog schema + rules, no network | seconds |
+| `tests/run-validator-tests` | the validator provably REJECTS unsafe catalog shapes (`tests/fixtures/invalid-catalog/`), no network | seconds |
 | `scripts/verify-artifacts --checksum` | every catalog entry exists in Nexus and hashes match (`NEXUS_CURL_OPTS="-u user:pass"` for auth) | ~1 min |
 
-Note: the suites pin specific experiment tags (`REF=` near the top of each script);
-bump the pin when your change needs a new tag to be visible.
+What the pass counts vouch for:
+`poc-test.sh` runs its behavior matrix against your **working tree**
+(it links the checkout as the plugin and prints the reviewed commit);
+only its first phase uses the pinned experiment tags (`v0.0.3`/`v0.0.4`)
+to exercise the install/re-pin lifecycle over git.
+`bootstrap-test.sh` clones from the experiment GitLab
+and **fails loudly if its default branch is not your local HEAD** —
+push to the `experiment` remote before running it.
 Each suite prints `RESULT: N passed, M failed` and exits nonzero on any failure.
+
+Known limitation: only `linux-amd64` installs are executed end-to-end.
+The other approved platforms (`linux-arm64`, `darwin-arm64`) are covered by
+artifact existence + checksum verification and by the platform-data validation,
+but nothing executes their binaries — there is no arm64/macOS host in the stack.
 
 ### CI
 
@@ -118,23 +130,105 @@ If a pipeline shows **failed with zero jobs**, the YAML is invalid —
 GitLab hides the parse error; check it with the CI lint API
 (`POST /api/v4/projects/:id/ci/lint`).
 
-## Catalog changes
+## Catalog changes: adding and updating tools
+
+The catalog is the company allowlist —
+a version becomes installable the moment its record lands on the default branch,
+and never before.
+Both workflows below end in an ordinary merge request;
+CI (validate → verify existence → verify checksums → real install) is the approval gate.
+
+Credentials first (auth rides `NEXUS_CURL_OPTS` or `~/.netrc`, never files in the repo):
 
 ```bash
 export NEXUS_CURL_OPTS="-u developer:dev-mise-vault"   # experiment credentials
-
-scripts/add-version <tool> <version>      # verifies the artifact exists, takes sha from
-                                          # the .sha256sum sidecar (or hashes the download),
-                                          # appends to versions.json — never edits history
-scripts/validate-catalog                  # before every commit
-scripts/verify-artifacts --checksum
 ```
 
-New tool: author `catalog/<tool>/tool.json` by hand first —
-artifact name template per platform (only `{version}` is substituted),
-archive format, `strip_components`, `bin_paths`, optional `env`.
-Copy the closest existing tool as a starting point;
-`tests/fixtures/catalog/` shows deliberately broken shapes the validator must reject.
+### Approving a new version of an existing tool
+
+Precondition: the artifact for every supported platform is already uploaded to Nexus
+under `<nexus_url>/<tool>/<version>/<artifact-file>`
+(upload is a separate, admin-side step — this repository only records approvals).
+
+```bash
+scripts/add-version <tool> <version>   # e.g. scripts/add-version golangci-lint 2.12.3
+scripts/validate-catalog
+scripts/verify-artifacts --checksum --tool <tool>
+```
+
+`add-version` does three things, all fail-closed:
+
+1. verifies the artifact exists in Nexus for every platform declared in `tool.json`
+   (a specific error tells you whether it is missing, an auth failure, or a refused redirect);
+2. takes the SHA-256 from the `<artifact>.sha256sum` sidecar when present,
+   otherwise downloads and hashes the artifact itself —
+   either way the value is frozen into `versions.json`,
+   and installation verifies against the catalog value only, never the sidecar;
+3. appends one record to the END of `catalog/<tool>/versions.json` —
+   the array is ordered oldest-approved first and is append-only;
+   never reorder or rewrite existing records
+   (revoking a version is the one exception: delete its record, keep the order).
+
+Then open a merge request with the diff — it should be one small appended record.
+
+### Adding a brand-new tool
+
+1. Upload the artifacts (all platforms, plus optional `.sha256sum` sidecars) to Nexus
+   under `<tool>/<version>/`.
+
+2. Author `catalog/<tool>/tool.json` by hand — copy the closest existing tool:
+   - `glab` — archive with a `bin/` directory (`strip_components: 0`, `bin_paths: ["bin"]`)
+   - `golangci-lint` — archive nested in a versioned directory (`strip_components: 1`)
+   - `go` — full runtime distribution (`bin_paths` + `env` for GOROOT)
+
+   ```json
+   {
+     "name": "mytool",
+     "type": "archive",
+     "platforms": {
+       "linux-amd64": {
+         "artifact": "mytool_{version}_linux_amd64.tar.gz",
+         "format": "tar.gz",
+         "strip_components": 0,
+         "bin_paths": ["bin"]
+       }
+     }
+   }
+   ```
+
+   Field rules (enforced by the validator, so trying is cheap):
+   - `name` must equal the directory name.
+   - `platforms` keys are canonical ids (`linux-amd64`, `darwin-arm64`, ...);
+     list exactly the platforms you uploaded — installs on any other platform fail closed.
+   - `artifact` is an explicit file name template per platform;
+     only `{version}` is substituted, nothing is inferred from OS or architecture.
+     It must be a plain file name — no path separators, no shell metacharacters.
+   - `format`: `tar.gz` / `tar.xz` / `tar.bz2` / `zip`, or `binary`
+     for a single executable copied as `<install_path>/<tool>` and marked executable.
+   - `bin_paths`: directories (relative to the install dir, `.` allowed, `..` never)
+     that go on PATH.
+   - `env` (optional): extra environment variables;
+     `{install_path}` and `{version}` are substituted (e.g. `"GOROOT": "{install_path}"`).
+
+3. Approve the first version and validate — same commands as above:
+
+   ```bash
+   scripts/add-version <tool> <version>
+   scripts/validate-catalog
+   scripts/verify-artifacts --checksum --tool <tool>
+   ```
+
+4. Smoke it end-to-end against your working tree
+   (see "Fast iteration: link the working tree" above), then open the merge request.
+
+5. After the merge, developer machines pick the tool up on their next
+   `mise run vault-sync` — the generated alias file is derived from the catalog,
+   so a new tool means a new short-name alias automatically.
+
+Fixture note: `tests/fixtures/catalog/` holds schema-VALID entries that fail at
+runtime on purpose (wrong checksum, unsupported platform) for the behavior suites;
+`tests/fixtures/invalid-catalog/` holds the shapes the validator must REJECT,
+exercised by `tests/run-validator-tests`.
 
 ## Testing conventions
 
