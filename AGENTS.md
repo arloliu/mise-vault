@@ -76,9 +76,10 @@ The operative rules:
   Platform resolution is one-way: mise's runtime info yields a canonical key like `linux-amd64`,
   which selects a platform entry in `tool.json`.
   Nothing ever parses an artifact file name to infer OS or architecture.
-- The Nexus base URL comes from (highest wins):
-  a per-project tool option, the bracketed option inside each generated alias,
-  then `config/defaults.json` in the plugin checkout.
+- The Nexus base URL is committed in `config/defaults.json` (it is not a secret; auth never lives in URLs)
+  and read from the plugin checkout at install time,
+  so it always matches the installed plugin version.
+  A per-project tool option can override it; generated aliases are pure routing and carry no URL.
   Environment variables are NOT a supported channel —
   mise sandboxes `os.getenv` inside plugin hooks (see lessons below).
 - Sidecar checksum files in Nexus (`<artifact>.sha256sum`) feed `scripts/add-version` only.
@@ -86,6 +87,9 @@ The operative rules:
   a checksum stored next to the artifact it describes proves nothing if the store is compromised.
 - Bootstrap is git-based (`git clone --depth 1 -b <tag>` then run `install.sh`),
   not `curl | sh` — see the GitLab raw-route lesson below.
+  `install.sh` self-detects its release tag and repository URL from the checkout it runs in
+  (cloning tag X means installing tag X); it refuses to run from a branch checkout
+  unless `MISE_VAULT_REF` is set explicitly.
 
 ## Lessons learned (empirical, against mise v2026.8.8 and current GitLab/Nexus)
 

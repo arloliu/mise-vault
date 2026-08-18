@@ -46,10 +46,11 @@ TOML
 # the generated conf.d file (aliases + nexus_url option per tool)
 cat > "$T/.config/mise/conf.d/mise-vault.toml" <<TOML
 [tool_alias]
-go = "vault:go[nexus_url=$NEXUS/repository/devtools]"
+go = "vault:go"
+glab = "vault:glab"
+smoke = "vault:smoke"
+# one alias keeps an explicit URL option to cover the override channel
 golangci-lint = "vault:golangci-lint[nexus_url=$NEXUS/repository/devtools]"
-glab = "vault:glab[nexus_url=$NEXUS/repository/devtools]"
-smoke = "vault:smoke[nexus_url=$NEXUS/repository/devtools]"
 TOML
 
 echo "== Phase 1: plugin install (netrc only, no token in URL, gix=false) =="

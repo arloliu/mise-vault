@@ -23,19 +23,34 @@
 #   4. generate ~/.config/mise/conf.d/mise-vault.toml via vault-sync
 #   5. smoke-test version discovery through a short name
 #
-# Configuration (release process stamps the defaults; env overrides for testing):
+# The release tag and repository URL are self-detected from the checkout this
+# script runs in: cloning tag vX.Y.Z means installing vX.Y.Z — nothing to keep
+# in sync per release. Environment overrides (required for the single-file
+# CI download path, which has no git checkout):
 #   MISE_VAULT_REPO_URL  git URL of this repository
 #   MISE_VAULT_REF       release tag to pin
 set -euo pipefail
 
-REPO_URL="${MISE_VAULT_REPO_URL:-https://gitlab.company.example/devtools/mise-vault.git}"
-REF="${MISE_VAULT_REF:-v0.0.5}"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PLUGIN_NAME=vault
 DATA_DIR="${MISE_DATA_DIR:-$HOME/.local/share/mise}"
 PLUGIN_DIR="$DATA_DIR/plugins/$PLUGIN_NAME"
 
 say()  { printf 'mise-vault install: %s\n' "$*"; }
 fail() { printf 'mise-vault install: ERROR: %s\n' "$*" >&2; exit 1; }
+
+# --- 0. determine release tag and repository URL ------------------------------
+if [ -n "${MISE_VAULT_REF:-}" ]; then
+    REF="$MISE_VAULT_REF"
+elif REF=$(git -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null); then
+    :  # running from a tagged checkout: install exactly what was cloned
+else
+    fail "cannot determine the release tag: run this script from a tagged checkout \
+(git clone --depth 1 -b <tag> ...) or set MISE_VAULT_REF. Installing from a branch is not supported."
+fi
+REPO_URL="${MISE_VAULT_REPO_URL:-$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)}"
+[ -n "$REPO_URL" ] || fail "cannot determine the repository URL: set MISE_VAULT_REPO_URL"
+say "release $REF from $REPO_URL"
 
 # --- 1. prerequisites --------------------------------------------------------
 command -v mise >/dev/null || fail "mise is not installed (see the company mise onboarding page)"

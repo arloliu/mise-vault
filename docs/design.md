@@ -22,8 +22,10 @@ this document states the resulting rules in plain language.
    The plugin returns catalog order verbatim and makes no semver assumption;
    CI validates ordering and uniqueness.
 5. **Short-name routing is solved with mise's `[tool_alias]`**
-   in a generated file `~/.config/mise/conf.d/mise-vault.toml`
-   (aliases carry the Nexus base URL as a bracketed per-tool option).
+   in a generated file `~/.config/mise/conf.d/mise-vault.toml`.
+   Aliases are pure routing entries (`go = "vault:go"`);
+   the Nexus base URL is committed in the plugin's `config/defaults.json`
+   and read from the installed checkout, so URL and plugin version cannot diverge.
    The file is derived from the catalog by `scripts/vault-sync`, never hand-edited,
    and `mise run vault-sync <tag>` performs plugin update + regeneration.
    An alias pointing at an uninstalled plugin does not auto-install it,

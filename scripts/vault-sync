@@ -2,7 +2,9 @@
 # vault-sync — regenerate the machine's mise-vault config from the plugin catalog.
 #
 # Generates ~/.config/mise/conf.d/mise-vault.toml containing:
-#   - [tool_alias] <tool> = "vault:<tool>[nexus_url=...]"  for every catalog tool
+#   - [tool_alias] <tool> = "vault:<tool>"  for every catalog tool (pure routing;
+#     the Nexus URL lives in the plugin checkout's config/defaults.json, so it
+#     always matches the installed plugin version)
 #   - [tasks.vault-sync] so `mise run vault-sync` re-runs this script
 #
 # With a ref argument, first re-pins the plugin to that release, then
@@ -28,9 +30,10 @@ if [ -n "$REF" ]; then
     exec "$PLUGIN_DIR/scripts/vault-sync"
 fi
 
-# --- read defaults from the plugin checkout ---------------------------------
-NEXUS_URL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['nexus_url'])" \
-    "$PLUGIN_DIR/config/defaults.json")
+# --- sanity: the plugin checkout must carry a usable Nexus URL --------------
+python3 -c "import json,sys; json.load(open(sys.argv[1]))['nexus_url']" \
+    "$PLUGIN_DIR/config/defaults.json" \
+    || { echo "vault-sync: broken plugin checkout: config/defaults.json unusable" >&2; exit 1; }
 
 TOOLS=$(cd "$PLUGIN_DIR/catalog" && ls -1d */ | tr -d /)
 [ -n "$TOOLS" ] || { echo "vault-sync: empty catalog in $PLUGIN_DIR" >&2; exit 1; }
@@ -45,7 +48,7 @@ TMP=$(mktemp)
     echo
     echo "[tool_alias]"
     for tool in $TOOLS; do
-        echo "$tool = 'vault:$tool[nexus_url=$NEXUS_URL]'"
+        echo "$tool = 'vault:$tool'"
     done
     echo
     echo "[tasks.vault-sync]"

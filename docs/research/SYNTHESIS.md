@@ -357,3 +357,14 @@ including the `vault-sync <ref>` form that re-pins the plugin and regenerates fr
 | D11 | **Public fallback is fully blocked by policy.** Short names not covered by the generated alias file must not reach mise's public registry. Bootstrap will additionally set the relevant disable settings (`disable_default_registry`, `disable_backends` — exact list to be finalized empirically, since these settings do not cover every backend type), and network-level isolation remains the hard guarantee. | Decided; implementation lands with the offline-gate work |
 | D12 | **install.sh enforces a minimum mise version** — the lowest release supporting every feature we use (backend plugins, `[tool_alias]` + bracketed opts, `gix`/`libgit2` settings, conf.d, global tasks, `#ref` pinning). | Research in flight (`mise-version-floor.md`) |
 | D13 | **Org-wide plugin update/rollback process** | Research in flight (`plugin-rollout-strategies.md`); production `defaults.json` stamping strategy under discussion |
+
+---
+
+## 13. Nexus-URL configuration decisions (2026-08-18, grilled with the user)
+
+| # | Decision |
+|---|---|
+| D14 | The production Nexus base URL is **committed in `config/defaults.json`** — no release-time stamping (would break "tag = deliverable"), no bootstrap-time injection. Single Nexus instance. The URL is not a secret; credentials never appear in URLs. |
+| D15 | Generated aliases are **pure routing** (`go = 'vault:go'`), carrying no URL. The runtime URL comes from the installed plugin checkout's `defaults.json`, eliminating the stale-embedded-URL divergence class (e.g. `mise plugin update` run without vault-sync). Per-project `[tools]` options remain the override channel; verified: bootstrap-test 14/14, poc-test 20/20 with both channels covered. |
+| D16 | Nexus migration = catalog MR updating `defaults.json` + new tag + fleet `vault-sync`; old pinned releases are covered by a **time-boxed network-layer redirect** from the old hostname, with a runbook requiring all users and CI pins to upgrade before the window closes. |
+| D17 | `install.sh` **self-detects** its release tag (`git describe --tags --exact-match` on its own checkout) and repository URL (`git remote get-url origin`) — cloning tag X installs tag X, nothing to bump per release. It refuses branch checkouts without an explicit `MISE_VAULT_REF`. (Found stale hardcoded default `v0.0.5` during review — the failure mode this eliminates.) |
