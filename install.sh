@@ -10,10 +10,14 @@
 #       https://gitlab.company.example/devtools/mise-vault.git /tmp/mise-vault-bootstrap
 #   /tmp/mise-vault-bootstrap/install.sh
 #
-# Token-based alternative (CI / environments with $GITLAB_TOKEN):
+# Token-based alternative (CI / environments with $GITLAB_TOKEN).
+# Without a git checkout the script cannot self-detect its version and origin,
+# so both must be supplied in the environment:
 #
 #   curl -fsSL --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-#       "https://gitlab.company.example/api/v4/projects/devtools%2Fmise-vault/repository/files/install.sh/raw?ref=vX.Y.Z" | bash
+#       "https://gitlab.company.example/api/v4/projects/devtools%2Fmise-vault/repository/files/install.sh/raw?ref=vX.Y.Z" \
+#       | MISE_VAULT_REF=vX.Y.Z \
+#         MISE_VAULT_REPO_URL=https://gitlab.company.example/devtools/mise-vault.git bash
 #
 # What it does (idempotent — safe to re-run):
 #   1. verify prerequisites (mise, git, curl, sha256 tool)

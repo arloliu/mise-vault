@@ -69,6 +69,7 @@ An update usually just means new approved tool versions.
    ```bash
    scripts/add-version <tool> <version>
    scripts/validate-catalog
+   scripts/verify-artifacts --checksum --tool <tool>
    ```
 
    For a brand-new tool, author `catalog/<tool>/tool.json` first

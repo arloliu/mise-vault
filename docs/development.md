@@ -68,6 +68,10 @@ T=$(mktemp -d)
 HOME="$T" bash -c '
   mkdir -p "$HOME/.config/mise"
   printf "[settings]\ngix = false\nlibgit2 = false\n" > "$HOME/.config/mise/config.toml"
+  # downloads ride ~/.netrc — the throwaway HOME needs its own copy
+  # (experiment credentials; production uses your real Nexus entry)
+  printf "machine 127.0.0.2\n  login developer\n  password dev-mise-vault\n" > "$HOME/.netrc"
+  chmod 600 "$HOME/.netrc"
   mise plugins link vault /path/to/your/checkout
   mise ls-remote vault:golangci-lint
   mise install vault:golangci-lint@2.12.2
@@ -75,10 +79,6 @@ HOME="$T" bash -c '
 '
 rm -rf "$T"
 ```
-
-Downloads need credentials: either put a netrc in the throwaway HOME
-(copy the machine entries from `experiment/README.md`)
-or point the catalog at a Nexus that allows your access.
 
 ### Full verification: push to the experiment GitLab and run the suites
 
@@ -102,8 +102,13 @@ git tag v0.0.X && git push experiment v0.0.X
 What the pass counts vouch for:
 `poc-test.sh` runs its behavior matrix against your **working tree**
 (it links the checkout as the plugin and prints the reviewed commit);
-only its first phase uses the pinned experiment tags (`v0.0.3`/`v0.0.4`)
+only its first phase uses pinned experiment tags
 to exercise the install/re-pin lifecycle over git.
+Expected version lists are derived from the catalog at runtime,
+so approving a new version does not require editing the suites;
+the pinned lifecycle tags default to `v0.0.3`/`v0.0.4`/`v0.0.14` and can be
+overridden with `EXPERIMENT_TAG_A`, `EXPERIMENT_TAG_B`, and `EXPERIMENT_PIN_TAG`
+on a freshly provisioned experiment GitLab.
 `bootstrap-test.sh` clones from the experiment GitLab
 and **fails loudly if its default branch is not your local HEAD** —
 push to the `experiment` remote before running it.
@@ -155,6 +160,9 @@ scripts/add-version <tool> <version>   # e.g. scripts/add-version golangci-lint 
 scripts/validate-catalog
 scripts/verify-artifacts --checksum --tool <tool>
 ```
+
+`add-version --dry-run` prints the record it would append without touching
+`versions.json` — useful the first time you approve a version for a new tool.
 
 `add-version` does three things, all fail-closed:
 
