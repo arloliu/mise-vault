@@ -87,9 +87,12 @@ The operative rules:
   a checksum stored next to the artifact it describes proves nothing if the store is compromised.
 - Bootstrap is git-based (`git clone --depth 1 -b <tag>` then run `install.sh`),
   not `curl | sh` — see the GitLab raw-route lesson below.
-  `install.sh` self-detects its release tag and repository URL from the checkout it runs in
-  (cloning tag X means installing tag X); it refuses to run from a branch checkout
-  unless `MISE_VAULT_REF` is set explicitly.
+  `install.sh` self-detects the version and repository URL from the checkout it runs in:
+  a tagged checkout installs that tag, a branch checkout installs the exact cloned commit.
+  Every commit on the default branch is a valid current version
+  (the approval boundary is merge request + CI, not tagging);
+  tags are optional markers for pinning and rollback,
+  and users update with `mise run vault-sync latest` or `mise run vault-sync <tag>`.
 
 ## Lessons learned (empirical, against mise v2026.8.8 and current GitLab/Nexus)
 

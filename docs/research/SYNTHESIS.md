@@ -368,3 +368,11 @@ including the `vault-sync <ref>` form that re-pins the plugin and regenerates fr
 | D15 | Generated aliases are **pure routing** (`go = 'vault:go'`), carrying no URL. The runtime URL comes from the installed plugin checkout's `defaults.json`, eliminating the stale-embedded-URL divergence class (e.g. `mise plugin update` run without vault-sync). Per-project `[tools]` options remain the override channel; verified: bootstrap-test 14/14, poc-test 20/20 with both channels covered. |
 | D16 | Nexus migration = catalog MR updating `defaults.json` + new tag + fleet `vault-sync`; old pinned releases are covered by a **time-boxed network-layer redirect** from the old hostname, with a runbook requiring all users and CI pins to upgrade before the window closes. |
 | D17 | `install.sh` **self-detects** its release tag (`git describe --tags --exact-match` on its own checkout) and repository URL (`git remote get-url origin`) — cloning tag X installs tag X, nothing to bump per release. It refuses branch checkouts without an explicit `MISE_VAULT_REF`. (Found stale hardcoded default `v0.0.5` during review — the failure mode this eliminates.) |
+
+---
+
+## 14. Update-model simplification (2026-08-18, user decision)
+
+| # | Decision |
+|---|---|
+| D18 | **No ring-based rollout.** Every commit on the default branch IS the current version — the approval boundary is merge request + CI, not tagging. Users update with `mise run vault-sync latest` (default-branch HEAD) or pin with `vault-sync <tag>`; rollback = sync to an older tag or commit. `install.sh` installs exactly what was cloned: a tag on tagged checkouts, the exact commit on branch checkouts, env override for the checkout-less CI path. The ring/canary research (`plugin-rollout-strategies.md`) is retained as reference should fleet size later demand staging; its staleness-nudge and CI-floor ideas remain compatible with this model. Verified: bootstrap-test 16/16. |

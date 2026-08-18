@@ -7,10 +7,10 @@
 #     always matches the installed plugin version)
 #   - [tasks.vault-sync] so `mise run vault-sync` re-runs this script
 #
-# With a ref argument, first re-pins the plugin to that release, then
-# regenerates from the NEW checkout:
+# With an argument, first updates the plugin, then regenerates from the NEW checkout:
 #   vault-sync            # regenerate only
-#   vault-sync v1.2.0     # update plugin to v1.2.0, then regenerate
+#   vault-sync latest     # update plugin to the newest approved catalog (main HEAD)
+#   vault-sync v1.2.0     # pin the plugin to a specific tag (or commit)
 #
 # The generated file is derived data: never hand-edit it.
 set -euo pipefail
@@ -25,7 +25,11 @@ REF="${1:-}"
 if [ -n "$REF" ]; then
     URL=$(git -C "$PLUGIN_DIR" remote get-url origin)
     echo "vault-sync: updating plugin to $REF ..."
-    mise plugin install -f "$PLUGIN_NAME" "$URL#$REF"
+    if [ "$REF" = "latest" ]; then
+        mise plugin install -f "$PLUGIN_NAME" "$URL"          # default branch HEAD
+    else
+        mise plugin install -f "$PLUGIN_NAME" "$URL#$REF"     # pinned tag or commit
+    fi
     # the checkout has been replaced — hand over to the new script version
     exec "$PLUGIN_DIR/scripts/vault-sync"
 fi

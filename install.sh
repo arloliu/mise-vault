@@ -23,12 +23,14 @@
 #   4. generate ~/.config/mise/conf.d/mise-vault.toml via vault-sync
 #   5. smoke-test version discovery through a short name
 #
-# The release tag and repository URL are self-detected from the checkout this
-# script runs in: cloning tag vX.Y.Z means installing vX.Y.Z — nothing to keep
-# in sync per release. Environment overrides (required for the single-file
-# CI download path, which has no git checkout):
+# The version and repository URL are self-detected from the checkout this
+# script runs in: cloning a tag installs that tag; cloning the default branch
+# installs the exact commit that was cloned. Every commit on the default
+# branch is a valid current version (changes are gated by merge request + CI).
+# Environment overrides (required for the single-file CI download path,
+# which has no git checkout):
 #   MISE_VAULT_REPO_URL  git URL of this repository
-#   MISE_VAULT_REF       release tag to pin
+#   MISE_VAULT_REF       tag, commit, or "latest" (default branch HEAD)
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -43,14 +45,15 @@ fail() { printf 'mise-vault install: ERROR: %s\n' "$*" >&2; exit 1; }
 if [ -n "${MISE_VAULT_REF:-}" ]; then
     REF="$MISE_VAULT_REF"
 elif REF=$(git -C "$SCRIPT_DIR" describe --tags --exact-match 2>/dev/null); then
-    :  # running from a tagged checkout: install exactly what was cloned
+    :  # tagged checkout: install exactly that tag
+elif REF=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null); then
+    :  # branch checkout: install exactly the commit that was cloned
 else
-    fail "cannot determine the release tag: run this script from a tagged checkout \
-(git clone --depth 1 -b <tag> ...) or set MISE_VAULT_REF. Installing from a branch is not supported."
+    fail "cannot determine the version: run this script from a git checkout or set MISE_VAULT_REF"
 fi
 REPO_URL="${MISE_VAULT_REPO_URL:-$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)}"
 [ -n "$REPO_URL" ] || fail "cannot determine the repository URL: set MISE_VAULT_REPO_URL"
-say "release $REF from $REPO_URL"
+say "version $REF from $REPO_URL"
 
 # --- 1. prerequisites --------------------------------------------------------
 command -v mise >/dev/null || fail "mise is not installed (see the company mise onboarding page)"
@@ -67,8 +70,9 @@ mise settings libgit2=false
 say "settings: gix=false libgit2=false (plugin git ops use the system git + its credential chain)"
 
 # --- 3. plugin pinned to a release tag ----------------------------------------
-say "installing plugin $PLUGIN_NAME from $REPO_URL#$REF ..."
-mise plugin install -f "$PLUGIN_NAME" "$REPO_URL#$REF" \
+if [ "$REF" = "latest" ]; then PLUGIN_SPEC="$REPO_URL"; else PLUGIN_SPEC="$REPO_URL#$REF"; fi
+say "installing plugin $PLUGIN_NAME from $PLUGIN_SPEC ..."
+mise plugin install -f "$PLUGIN_NAME" "$PLUGIN_SPEC" \
     || fail "plugin install failed — check network access and ~/.netrc credentials for the GitLab host"
 
 # --- 4. generate machine config (aliases + nexus_url + vault-sync task) -------

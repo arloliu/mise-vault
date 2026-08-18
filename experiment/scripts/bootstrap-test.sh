@@ -5,7 +5,7 @@ set -uo pipefail
 
 GITLAB=http://127.0.0.3:8929
 NEXUS=http://127.0.0.2:8081
-REF=v0.0.9
+REF=v0.0.10
 
 T=$(mktemp -d /tmp/mise-vault-bootstrap.XXXXXX)
 PASS=0; FAIL=0
@@ -74,6 +74,21 @@ rm -f "$T/.config/mise/conf.d/mise-vault.toml"
   && grep -q "updating plugin to $REF" "$T/sync-ref.log" \
   && ok "'mise run vault-sync <ref>' re-pins plugin then regenerates" \
   || bad "vault-sync with ref (log: $(tail -2 "$T/sync-ref.log" 2>/dev/null | head -c 200))"
+(cd "$T" && mise run vault-sync latest > "$T/sync-latest.log" 2>&1) \
+  && grep -q "updating plugin to latest" "$T/sync-latest.log" \
+  && mise ls-remote glab 2>/dev/null | grep -qx 1.113.0 \
+  && ok "'mise run vault-sync latest' updates to default-branch HEAD" \
+  || bad "vault-sync latest (log: $(tail -2 "$T/sync-latest.log" 2>/dev/null | head -c 200))"
+
+echo "== 6. branch clone installs the cloned commit (latest model) =="
+rm -rf "$T/bootstrap-main"
+GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$GITLAB/devtools/mise-vault.git" "$T/bootstrap-main" \
+  && EXPECT=$(git -C "$T/bootstrap-main" describe --tags --exact-match 2>/dev/null \
+              || git -C "$T/bootstrap-main" rev-parse HEAD) \
+  && "$T/bootstrap-main/install.sh" > "$T/install-main.log" 2>&1 \
+  && grep -q "version $EXPECT" "$T/install-main.log" \
+  && ok "default-branch clone installs exactly what was cloned ($(echo $EXPECT | head -c 12))" \
+  || bad "branch-clone bootstrap (log: $(tail -2 "$T/install-main.log" 2>/dev/null | head -c 200))"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed   (HOME: $T — kept on failure)"
