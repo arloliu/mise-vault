@@ -6,6 +6,7 @@ services:
     container_name: mv-nexus
     ports:
       - "8081:8081"
+    networks: [default, isolated]
     volumes:
       - nexus-data:/nexus-data
     environment:
@@ -32,6 +33,7 @@ services:
         gitlab_rails['gitlab_shell_ssh_port'] = 2224
         prometheus_monitoring['enable'] = false
     shm_size: "256m"
+    networks: [default, isolated]
     volumes:
       - gitlab-config:/etc/gitlab
       - gitlab-logs:/var/log/gitlab
@@ -42,3 +44,8 @@ volumes:
   gitlab-config:
   gitlab-logs:
   gitlab-data:
+
+networks:
+  default:
+  isolated:
+    internal: true   # no outbound route: simulates the fully private network

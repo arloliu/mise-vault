@@ -376,3 +376,34 @@ including the `vault-sync <ref>` form that re-pins the plugin and regenerates fr
 | # | Decision |
 |---|---|
 | D18 | **No ring-based rollout.** Every commit on the default branch IS the current version — the approval boundary is merge request + CI, not tagging. Users update with `mise run vault-sync latest` (default-branch HEAD) or pin with `vault-sync <tag>`; rollback = sync to an older tag or commit. `install.sh` installs exactly what was cloned: a tag on tagged checkouts, the exact commit on branch checkouts, env override for the checkout-less CI path. The ring/canary research (`plugin-rollout-strategies.md`) is retained as reference should fleet size later demand staging; its staleness-nudge and CI-floor ideas remain compatible with this model. Verified: bootstrap-test 16/16. |
+
+---
+
+## 15. Offline gate + public-fallback blocking (2026-08-18) — D11 implemented
+
+Offline gate (`experiment/scripts/offline-test.sh`, 10/10):
+a container attached only to an `internal: true` Docker network
+(github.com/proxy.golang.org unreachable; only the GitLab and Nexus containers routable)
+ran the complete flow — netrc bootstrap, catalog discovery, glab archive install,
+go runtime install with sha verification — with zero public internet.
+
+D11 implementation findings (all empirical, mise v2026.8.8):
+
+- `disable_backends` accepts and enforces **every** backend type including `core`
+  (`mise ls-remote node` → "none of its backends (core:node) are supported"),
+  which is stronger than the earlier research suggested.
+- Explicit backend specs are refused too
+  (`mise install aqua:jqlang/jq@…` → "backend aqua is disabled by disable_backends").
+- Listing `vfox` in `disable_backends` does **not** affect the vault plugin —
+  backend plugins are addressed by their own plugin name,
+  distinct from the `vfox:` remote backend type.
+  Verified: full block list active, `vault:glab` installs and runs.
+- `install.sh` now writes `disable_default_registry=true` plus the full
+  `disable_backends` list; bootstrap-test asserts both block behaviors (18/18).
+- **MISE_OFFLINE=1 does not block the plugin's own downloads**
+  (they go through `cmd`-spawned curl, outside mise's HTTP layer) —
+  this settles the corresponding open risk from the mechanics research:
+  fail-closed is enforced by the plugin constructing only Nexus URLs, as designed.
+- Test-harness gotcha: under `set -o pipefail`,
+  `mise <failing-cmd> 2>&1 | grep -q <expected-error>` reports failure
+  even when grep matches (mise's nonzero exit wins) — capture output first, then grep.

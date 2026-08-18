@@ -5,7 +5,7 @@ set -uo pipefail
 
 GITLAB=http://127.0.0.3:8929
 NEXUS=http://127.0.0.2:8081
-REF=v0.0.10
+REF=v0.0.11
 
 T=$(mktemp -d /tmp/mise-vault-bootstrap.XXXXXX)
 PASS=0; FAIL=0
@@ -57,6 +57,15 @@ printf '[tools]\nglab = "1.113.0"\n' > "$PROJ/mise.toml"
 (cd "$PROJ" && mise tool glab 2>/dev/null | grep -q "vault:glab") \
   && ok "glab resolved through vault backend (not public registry)" \
   || bad "glab backend is NOT vault ($(cd "$PROJ" && mise tool glab 2>/dev/null | grep -i backend | head -1))"
+# catalog-only policy: uncataloged names and explicit public backends must fail
+JQOUT=$(timeout 30 mise ls-remote jq 2>&1 || true)
+echo "$JQOUT" | grep -q "none of its backends" \
+  && ok "uncataloged tool (jq) blocked — no public registry reach" \
+  || bad "jq was not blocked ($(echo $JQOUT | head -c 100))"
+AQOUT=$(timeout 30 mise install aqua:jqlang/jq@1.7.1 2>&1 || true)
+echo "$AQOUT" | grep -q "disabled by disable_backends" \
+  && ok "explicit public backend spec refused" \
+  || bad "aqua: spec was not refused ($(echo $AQOUT | head -c 100))"
 
 echo "== 4. idempotency: run the bootstrap again =="
 "$T/bootstrap/install.sh" > "$T/install2.log" 2>&1 \

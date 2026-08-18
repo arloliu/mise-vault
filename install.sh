@@ -18,7 +18,8 @@
 # What it does (idempotent — safe to re-run):
 #   1. verify prerequisites (mise, git, curl, sha256 tool)
 #   2. write user-scoped mise settings: gix=false, libgit2=false, so plugin git
-#      operations use the real git binary and its credential chain (~/.netrc)
+#      operations use the real git binary and its credential chain (~/.netrc);
+#      plus disable all public backends (catalog-only policy, defense in depth)
 #   3. install the vault backend plugin pinned to a release tag
 #   4. generate ~/.config/mise/conf.d/mise-vault.toml via vault-sync
 #   5. smoke-test version discovery through a short name
@@ -68,6 +69,15 @@ say "prerequisites ok (mise $(mise --version 2>/dev/null | head -1))"
 mise settings gix=false
 mise settings libgit2=false
 say "settings: gix=false libgit2=false (plugin git ops use the system git + its credential chain)"
+
+# Company policy: tools come only from the approved catalog. Disable every
+# public backend so an uncataloged short name fails loudly instead of silently
+# reaching a public registry. This does not affect the vault plugin (backend
+# plugins are addressed by their own plugin name), and network isolation
+# remains the hard guarantee — these settings are defense in depth.
+mise settings disable_default_registry=true
+mise settings disable_backends=aqua,asdf,vfox,ubi,github,gitlab,http,pipx,npm,cargo,gem,go,dotnet,spm,core
+say "settings: public backends disabled (catalog-only tool resolution)"
 
 # --- 3. plugin pinned to a release tag ----------------------------------------
 if [ "$REF" = "latest" ]; then PLUGIN_SPEC="$REPO_URL"; else PLUGIN_SPEC="$REPO_URL#$REF"; fi

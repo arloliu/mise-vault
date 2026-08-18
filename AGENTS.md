@@ -119,8 +119,16 @@ The operative rules:
   When probing endpoints, always check `-w '%{http_code}'` and the final URL, not just the exit code.
 - **If the generated alias file is missing, short names silently fall back to mise's public registry**
   (observed live: `glab` resolved to a public backend and contacted gitlab.com).
+  Bootstrap therefore disables all public backends
+  (`disable_default_registry=true` plus a full `disable_backends` list — `core` included, which works);
+  listing `vfox` there does not affect this plugin, which is addressed by its own name.
   Tests must assert the resolving backend (`mise tool <name>` shows `vault:<name>`),
   and network isolation remains the only hard guarantee of private-only operation.
+- **`MISE_OFFLINE=1` does not block this plugin's downloads**
+  (they run through `cmd`-spawned curl, outside mise's own HTTP layer).
+  Never-contact-the-internet is enforced by the plugin constructing only Nexus URLs.
+- **Under `set -o pipefail`, piping a failing mise command into `grep -q` hides the match** —
+  the nonzero mise exit wins the pipeline status. Capture output into a variable first, then grep.
 - **An alias pointing at an uninstalled plugin does not auto-install it.**
   Bootstrap must install the plugin before the aliases become usable.
 - **netrc matches hostname only — there is no port field.**
