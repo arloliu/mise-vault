@@ -407,3 +407,20 @@ D11 implementation findings (all empirical, mise v2026.8.8):
 - Test-harness gotcha: under `set -o pipefail`,
   `mise <failing-cmd> 2>&1 | grep -q <expected-error>` reports failure
   even when grep matches (mise's nonzero exit wins) — capture output first, then grep.
+
+---
+
+## 16. Multi-platform axis (2026-08-18)
+
+Catalog extended to `linux-amd64` + `linux-arm64` + `darwin-arm64`
+for all three tools (15 real artifacts seeded, all checksum-verified against Nexus).
+The per-platform explicit artifact strings absorbed every naming difference
+without code changes — including glab's OS-specific underscore naming —
+confirming the no-inference platform model.
+The unsupported-platform fail-closed path is now exercised
+(fixture tool declaring only `darwin-arm64`, installed via `mise plugins link`
+on a linux-amd64 host → "not available for linux-amd64"); poc-test 21/21.
+Note: existing pre-release version records were regenerated in place to add platforms;
+once the catalog is live, platform additions to an existing version
+must instead be a reviewed catalog MR (append-only discipline applies to versions, not platforms —
+tooling support for platform addition is future work).

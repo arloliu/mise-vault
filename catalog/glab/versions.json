@@ -4,6 +4,12 @@
     "platforms": {
       "linux-amd64": {
         "sha256": "c265589fb2018f310b6a27df9356efee42991f858e7e3a5fa232228a13b47467"
+      },
+      "linux-arm64": {
+        "sha256": "0c4cab3b35f7641e7955492b9491d7070698a958f0dfcb49d989e71bd78793c2"
+      },
+      "darwin-arm64": {
+        "sha256": "d8bc152c982c0fd6f687ecd864572d974de3f3ce756957d74e8e34c75ec96db6"
       }
     }
   }

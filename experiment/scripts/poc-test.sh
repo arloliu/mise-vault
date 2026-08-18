@@ -129,6 +129,28 @@ else
 fi
 rm -rf "$T2"
 
+echo "== Phase 9: unsupported platform fails closed (linked plugin + fixture) =="
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+T3=$(mktemp -d /tmp/mise-vault-poc3.XXXXXX)
+PLUG="$T3/plugin"
+mkdir -p "$PLUG"
+cp -r "$REPO_ROOT/metadata.lua" "$REPO_ROOT/hooks" "$REPO_ROOT/lib" "$REPO_ROOT/config" "$REPO_ROOT/catalog" "$PLUG/"
+cp -r "$REPO_ROOT/tests/fixtures/catalog/darwin-only" "$PLUG/catalog/"
+HOME="$T3" bash -c '
+  mkdir -p "$HOME/.config/mise"
+  printf "[settings]\ngix = false\nlibgit2 = false\n" > "$HOME/.config/mise/config.toml"
+  mise plugins link vault "'"$PLUG"'" >/dev/null 2>&1
+  mise ls-remote vault:darwin-only 2>/dev/null | grep -qx 1.0.0 || exit 2
+  OUT=$(mise install vault:darwin-only@1.0.0 2>&1 || true)
+  echo "$OUT" | grep -q "not available for linux-amd64" || { echo "$OUT" | tail -2; exit 3; }
+'
+case $? in
+  0) ok "darwin-only tool listed, install rejected: not available for linux-amd64" ;;
+  2) bad "fixture tool not listed via linked plugin" ;;
+  *) bad "unsupported-platform error message wrong" ;;
+esac
+rm -rf "$T3"
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed   (test HOME: $T — kept for inspection if failures)"
 [ "$FAIL" = 0 ] && rm -rf "$T"

@@ -1,0 +1,11 @@
+{
+  "name": "darwin-only",
+  "type": "binary",
+  "platforms": {
+    "darwin-arm64": {
+      "artifact": "darwin-only-{version}.txt",
+      "format": "binary",
+      "bin_paths": ["."]
+    }
+  }
+}

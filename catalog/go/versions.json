@@ -4,6 +4,12 @@
     "platforms": {
       "linux-amd64": {
         "sha256": "39042a078ea9ceebe3ecda4a7188f0f5b96e14a071d27923ba7f40b456e85ae3"
+      },
+      "linux-arm64": {
+        "sha256": "adad240fcb6bd180cf973b4b7c747baf4ec81d08b7d40ca35940ee4531971490"
+      },
+      "darwin-arm64": {
+        "sha256": "916fe61a2bc78dd516b3629ee3428b06e17141b85a70f1986c260149a3d2ffbd"
       }
     }
   },
@@ -12,6 +18,12 @@
     "platforms": {
       "linux-amd64": {
         "sha256": "708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89"
+      },
+      "linux-arm64": {
+        "sha256": "d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e"
+      },
+      "darwin-arm64": {
+        "sha256": "2dc95ce4675829f2df0e86b28bcef3283635902062a5f0580ca659bf570f3204"
       }
     }
   }
