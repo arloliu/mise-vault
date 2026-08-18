@@ -58,6 +58,13 @@ tmp/                    scratch area, not part of the deliverable
 - **Generated files are never hand-edited.**
   `~/.config/mise/conf.d/mise-vault.toml` is derived from the catalog by `scripts/vault-sync`;
   regenerate it, do not patch it.
+- **Commit messages follow Conventional Commits.**
+  Subject line `type: summary` (types used here: feat, fix, docs, test, ci, build, refactor, chore),
+  imperative mood, lowercase after the colon, no trailing period.
+  The no-jargon rule applies to commit messages too:
+  describe the change itself in plain English —
+  never reference internal process artifacts
+  (review round numbers, report files, decision IDs).
 
 ## Decisions that bind the implementation
 
