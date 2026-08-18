@@ -73,14 +73,29 @@ def check_artifact(url):
 
 
 def sha_from_sidecar(url):
-    """Try <artifact>.sha256sum then <artifact>.sha256; return sha or None."""
+    """Try <artifact>.sha256sum then <artifact>.sha256; return sha or None.
+
+    Only a plain 404 counts as "no sidecar" (that is normal). Any other
+    failure — authentication, redirect, transport — is reported, so a real
+    problem is never mistaken for absence.
+    """
     for suffix in (".sha256sum", ".sha256"):
-        r = curl([url + suffix])
-        if r.returncode == 0:
-            m = SHA256_RE.search(r.stdout)
-            if m:
-                return m.group(1), suffix
-            print(f"  warn: sidecar {suffix} present but unparseable, ignoring", file=sys.stderr)
+        r = curl(["-w", "\n%{http_code}", url + suffix], follow=False)
+        if r.returncode != 0:
+            print(f"  warn: sidecar {suffix} unreachable ({curl_error(r)}), ignoring",
+                  file=sys.stderr)
+            continue
+        body, _, code = (r.stdout or "").rpartition("\n")
+        if code == "404":
+            continue
+        if code != "200":
+            print(f"  warn: sidecar {suffix} fetch returned HTTP {code}, ignoring",
+                  file=sys.stderr)
+            continue
+        m = SHA256_RE.search(body)
+        if m:
+            return m.group(1), suffix
+        print(f"  warn: sidecar {suffix} present but unparseable, ignoring", file=sys.stderr)
     return None, None
 
 
