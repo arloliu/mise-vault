@@ -5,7 +5,7 @@ set -uo pipefail
 
 GITLAB=http://127.0.0.3:8929
 NEXUS=http://127.0.0.2:8081
-REF=v0.0.13
+REF=v0.0.14
 
 T=$(mktemp -d /tmp/mise-vault-bootstrap.XXXXXX)
 PASS=0; FAIL=0

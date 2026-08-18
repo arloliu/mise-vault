@@ -37,11 +37,11 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PLUGIN_NAME=vault
 # Oldest mise release supporting everything this plugin uses. The binding
-# constraint is the strip_components option of the Lua archive extractor
-# (added in mise 2026.8.1; rounded up to a hardened patch release). If an
-# older floor is ever needed, replacing that extractor call with a tar
-# shell-out lowers the requirement to 2026.5.2 (tool-alias option passing).
-MISE_MIN_VERSION="2026.8.8"
+# constraint is the strip_components option of the Lua archive extractor,
+# added in mise 2026.8.1. If an older floor is ever needed, replacing that
+# extractor call with a tar shell-out lowers the requirement to 2026.5.2
+# (tool-alias option passing).
+MISE_MIN_VERSION="2026.8.1"
 DATA_DIR="${MISE_DATA_DIR:-$HOME/.local/share/mise}"
 PLUGIN_DIR="$DATA_DIR/plugins/$PLUGIN_NAME"
 

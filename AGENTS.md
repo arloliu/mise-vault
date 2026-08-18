@@ -85,7 +85,7 @@ The operative rules:
 - Sidecar checksum files in Nexus (`<artifact>.sha256sum`) feed `scripts/add-version` only.
   Installation verifies against the catalog value exclusively:
   a checksum stored next to the artifact it describes proves nothing if the store is compromised.
-- `install.sh` enforces mise >= 2026.8.8
+- `install.sh` enforces mise >= 2026.8.1
   (set by the archive extractor's `strip_components` support; numeric calver comparison).
 - Bootstrap is git-based (`git clone --depth 1 -b <tag>` then run `install.sh`),
   not `curl | sh` — see the GitLab raw-route lesson below.
