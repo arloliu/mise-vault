@@ -1,0 +1,18 @@
+[
+  {
+    "version": "2.12.1",
+    "platforms": {
+      "linux-amd64": {
+        "sha256": "82c7932d9aa10c34e22ef56961ac5aad71d4a14806a1a31b06931add2688b368"
+      }
+    }
+  },
+  {
+    "version": "2.12.2",
+    "platforms": {
+      "linux-amd64": {
+        "sha256": "8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553"
+      }
+    }
+  }
+]

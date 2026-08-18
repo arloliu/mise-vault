@@ -1,0 +1,11 @@
+{
+  "name": "smoke",
+  "type": "binary",
+  "platforms": {
+    "linux-amd64": {
+      "artifact": "smoke-{version}.txt",
+      "format": "binary",
+      "bin_paths": ["."]
+    }
+  }
+}

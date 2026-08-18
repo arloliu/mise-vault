@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gitlab.company.example/devtools/mise-vault/schemas/versions.schema.json",
+  "title": "mise-vault approved versions (catalog/<tool>/versions.json)",
+  "description": "Ordered array, oldest-approved first. Order is authoritative; the plugin returns it verbatim.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["version", "platforms"],
+    "properties": {
+      "version": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]*$" },
+      "platforms": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "patternProperties": {
+          "^(linux|darwin|windows)-(amd64|arm64)$": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["sha256"],
+            "properties": {
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

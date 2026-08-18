@@ -1,0 +1,8 @@
+--- mise-vault: private backend plugin serving company-approved tools
+--- from private Nexus, with the approval catalog bundled in this repo.
+PLUGIN = {
+    name = "vault",
+    version = "0.0.1",
+    description = "Company-approved developer tools from private Nexus",
+    author = "devtools",
+}

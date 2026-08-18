@@ -1,0 +1,10 @@
+[
+  {
+    "version": "0.0.1",
+    "platforms": {
+      "linux-amd64": {
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    }
+  }
+]

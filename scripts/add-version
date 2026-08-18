@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Append an approved version to a tool's catalog.
+
+For each platform declared in catalog/<tool>/tool.json:
+  1. render the artifact name and construct the Nexus URL,
+  2. verify the artifact exists (HTTP HEAD via curl),
+  3. obtain its SHA-256:
+       - preferred: the <artifact>.sha256sum / <artifact>.sha256 sidecar
+         (both "<sha>  <filename>" and bare-hash formats accepted),
+       - fallback: download the artifact and hash it locally,
+  4. append {version, platforms{...sha256}} to versions.json (end of array —
+     approval order; never inserted, never updated in place).
+
+Auth: curl runs with -n (~/.netrc) plus anything in $NEXUS_CURL_OPTS
+(e.g. NEXUS_CURL_OPTS="-u user:pass"). Credentials never live in files here.
+
+Usage:
+  scripts/add-version <tool> <version> [--nexus-url URL] [--platform P ...]
+                      [--catalog-dir DIR] [--dry-run]
+"""
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SHA256_RE = re.compile(r"\b([0-9a-f]{64})\b")
+
+
+def curl(args, **kw):
+    import os
+
+    extra = os.environ.get("NEXUS_CURL_OPTS", "").split()
+    return subprocess.run(
+        ["curl", "-fsSL", "-n", "--retry", "2", *extra, *args],
+        capture_output=True, text=kw.pop("text", True), **kw,
+    )
+
+
+def default_nexus_url():
+    defaults = REPO / "config" / "defaults.json"
+    if defaults.exists():
+        return json.loads(defaults.read_text()).get("nexus_url")
+    return None
+
+
+def artifact_exists(url):
+    return curl(["-I", "-o", "/dev/null", url]).returncode == 0
+
+
+def sha_from_sidecar(url):
+    """Try <artifact>.sha256sum then <artifact>.sha256; return sha or None."""
+    for suffix in (".sha256sum", ".sha256"):
+        r = curl([url + suffix])
+        if r.returncode == 0:
+            m = SHA256_RE.search(r.stdout)
+            if m:
+                return m.group(1), suffix
+            print(f"  warn: sidecar {suffix} present but unparseable, ignoring", file=sys.stderr)
+    return None, None
+
+
+def sha_by_download(url):
+    with tempfile.NamedTemporaryFile() as tmp:
+        r = curl(["-o", tmp.name, url], text=False)
+        if r.returncode != 0:
+            return None
+        h = hashlib.sha256()
+        with open(tmp.name, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("tool")
+    ap.add_argument("version")
+    ap.add_argument("--nexus-url", default=default_nexus_url())
+    ap.add_argument("--platform", action="append",
+                    help="restrict to these platforms (default: all in tool.json)")
+    ap.add_argument("--catalog-dir", default=str(REPO / "catalog"))
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    if not args.nexus_url:
+        sys.exit("error: no Nexus URL (pass --nexus-url or set config/defaults.json)")
+
+    tool_dir = Path(args.catalog_dir) / args.tool
+    tool_file = tool_dir / "tool.json"
+    versions_file = tool_dir / "versions.json"
+    if not tool_file.exists():
+        sys.exit(f"error: tool '{args.tool}' has no tool.json — author {tool_file} first")
+
+    tool = json.loads(tool_file.read_text())
+    versions = json.loads(versions_file.read_text()) if versions_file.exists() else []
+    if not isinstance(versions, list):
+        sys.exit(f"error: {versions_file} is not an array — migrate to the ordered-array schema first")
+    if any(rec.get("version") == args.version for rec in versions):
+        sys.exit(f"error: {args.tool} {args.version} already in catalog (records are immutable)")
+
+    platforms = args.platform or sorted(tool["platforms"])
+    unknown = set(platforms) - set(tool["platforms"])
+    if unknown:
+        sys.exit(f"error: platforms not declared in tool.json: {sorted(unknown)}")
+
+    record = {"version": args.version, "platforms": {}}
+    for plat in platforms:
+        pconf = tool["platforms"][plat]
+        artifact = pconf["artifact"].replace("{version}", args.version)
+        url = f"{args.nexus_url}/{args.tool}/{args.version}/{artifact}"
+        print(f"{plat}: {artifact}")
+
+        if not artifact_exists(url):
+            sys.exit(f"error: artifact missing in Nexus: {url}")
+        print("  exists in Nexus")
+
+        sha, suffix = sha_from_sidecar(url)
+        if sha:
+            print(f"  sha256 from sidecar {suffix}: {sha}")
+        else:
+            print("  no sidecar — downloading to hash locally ...")
+            sha = sha_by_download(url)
+            if not sha:
+                sys.exit(f"error: could not download {url} to compute sha256")
+            print(f"  sha256 computed: {sha}")
+        record["platforms"][plat] = {"sha256": sha}
+
+    versions.append(record)
+    rendered = json.dumps(versions, indent=2) + "\n"
+    if args.dry_run:
+        print(f"\n--dry-run: would append to {versions_file}:")
+        print(json.dumps(record, indent=2))
+        return
+    versions_file.write_text(rendered)
+    print(f"\nappended {args.tool} {args.version} to {versions_file}")
+    print("next: run scripts/validate-catalog, then open the catalog MR")
+
+
+if __name__ == "__main__":
+    main()
