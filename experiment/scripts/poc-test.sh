@@ -4,18 +4,38 @@
 #
 # Structure:
 #   Phase 1 exercises the plugin LIFECYCLE (install / re-pin over git + netrc)
-#   using the pinned experiment tags v0.0.3 / v0.0.4.
+#   using pinned experiment tags (defaults v0.0.3 / v0.0.4; override with
+#   EXPERIMENT_TAG_A / EXPERIMENT_TAG_B).
 #   Phase 2 then links the CURRENT WORKING TREE as the plugin, so every
 #   behavior check from phase 3 on runs the exact code under review —
 #   the reviewed commit is printed and never hidden behind a stale tag.
 #
-# Requires: experiment stack up + provisioned + seeded; plugin repo tagged v0.0.3/v0.0.4.
+# Requires: experiment stack up + provisioned + seeded; the lifecycle tags present.
 set -uo pipefail
 
 GITLAB=http://127.0.0.3:8929           # distinct loopback IPs => distinct netrc machines
 NEXUS=http://127.0.0.2:8081
 PLUGIN_URL="$GITLAB/devtools/mise-vault.git"
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# immutable experiment tags used only by the lifecycle phase; override when a
+# fresh experiment GitLab carries different tags
+TAG_A=${EXPERIMENT_TAG_A:-v0.0.3}
+TAG_B=${EXPERIMENT_TAG_B:-v0.0.4}
+
+# expected versions come from the working-tree catalog, so approving a new
+# version never requires editing this suite
+cat_versions() { # cat_versions <tool> -> all approved versions, space-separated
+  python3 -c "import json,sys; print(' '.join(r['version'] for r in json.load(open(sys.argv[1]))))" \
+    "$REPO_ROOT/catalog/$1/versions.json"
+}
+cat_latest() { # cat_latest <tool> -> newest approved version
+  python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[-1]['version'])" \
+    "$REPO_ROOT/catalog/$1/versions.json"
+}
+GCL_ALL=$(cat_versions golangci-lint)
+GCL_V=$(cat_latest golangci-lint)
+GLAB_V=$(cat_latest glab)
+GO_V=$(cat_latest go)
 
 T=$(mktemp -d /tmp/mise-vault-poc.XXXXXX)
 PASS=0; FAIL=0
@@ -62,15 +82,15 @@ smoke = "vault:smoke"
 golangci-lint = "vault:golangci-lint[nexus_url=$NEXUS/repository/devtools]"
 TOML
 
-echo "== Phase 1: plugin lifecycle over git (netrc, tags v0.0.3 -> v0.0.4) =="
-mise plugin install vault "$PLUGIN_URL#v0.0.3" >/dev/null 2>&1 \
-  && ok "mise plugin install vault <url>#v0.0.3 via netrc" \
-  || bad "mise plugin install vault <url>#v0.0.3 via netrc"
+echo "== Phase 1: plugin lifecycle over git (netrc, tags $TAG_A -> $TAG_B) =="
+mise plugin install vault "$PLUGIN_URL#$TAG_A" >/dev/null 2>&1 \
+  && ok "mise plugin install vault <url>#$TAG_A via netrc" \
+  || bad "mise plugin install vault <url>#$TAG_A via netrc"
 mise plugins ls 2>/dev/null | grep -q vault && ok "plugin registered" || bad "plugin registered"
 mise ls-remote vault:smoke 2>/dev/null | grep -q . \
-  && bad "smoke must NOT be listed at v0.0.3" || ok "smoke absent at catalog v0.0.3"
-mise plugin install -f vault "$PLUGIN_URL#v0.0.4" >/dev/null 2>&1 \
-  && ok "plugin re-pin to v0.0.4 (catalog update)" || bad "plugin re-pin to v0.0.4"
+  && bad "smoke must NOT be listed at $TAG_A" || ok "smoke absent at catalog $TAG_A"
+mise plugin install -f vault "$PLUGIN_URL#$TAG_B" >/dev/null 2>&1 \
+  && ok "plugin re-pin to $TAG_B (catalog update)" || bad "plugin re-pin to $TAG_B"
 mise ls-remote smoke 2>/dev/null | grep -qx "0.0.1" \
   && ok "new tool 'smoke' appears after catalog update" || bad "smoke not visible after update"
 
@@ -89,37 +109,37 @@ mise plugins link vault "$PLUG" >/dev/null 2>&1 \
 
 echo "== Phase 3: version discovery + short-name aliases (catalog only) =="
 LSR=$(mise ls-remote vault:golangci-lint 2>/dev/null)
-[ "$(printf '%s\n' "$LSR" | tr '\n' ' ')" = "2.12.1 2.12.2 " ] \
-  && ok "ls-remote vault:golangci-lint == exactly catalog (2.12.1 2.12.2)" \
+[ "$(echo $LSR)" = "$GCL_ALL" ] \
+  && ok "ls-remote vault:golangci-lint == exactly catalog ($GCL_ALL)" \
   || bad "ls-remote vault:golangci-lint (got: $(echo $LSR))"
 LSR2=$(mise ls-remote golangci-lint 2>/dev/null)
-[ "$(printf '%s\n' "$LSR2" | tr '\n' ' ')" = "2.12.1 2.12.2 " ] \
+[ "$(echo $LSR2)" = "$GCL_ALL" ] \
   && ok "ls-remote golangci-lint (short name) routed to vault backend" \
   || bad "ls-remote golangci-lint short name (got: $(echo $LSR2))"
 LSGO=$(mise ls-remote go 2>/dev/null)
-echo "$LSGO" | grep -qx "1.26.6" && ! echo "$LSGO" | grep -q "^1.24" \
+echo "$LSGO" | grep -qx "$GO_V" && ! echo "$LSGO" | grep -q "^1.24" \
   && ok "ls-remote go shows only catalog versions (core backend shadowed)" \
   || bad "ls-remote go (got: $(echo $LSGO | head -c 120))"
 
 echo "== Phase 4: installs (download via curl -n + sha256 + extract) =="
-check "install golangci-lint@2.12.2 (nested archive, strip=1)" mise install golangci-lint@2.12.2
-mise exec golangci-lint@2.12.2 -- golangci-lint version 2>/dev/null | grep -q "2.12.2" \
-  && ok "golangci-lint runs and reports 2.12.2" || bad "golangci-lint version check"
-check "install glab@1.113.0 (bin/ layout, strip=0)" mise install glab@1.113.0
-mise exec glab@1.113.0 -- glab --version 2>/dev/null | grep -qi "1.113.0" \
-  && ok "glab runs and reports 1.113.0" || bad "glab version check"
-check "install go@1.26.6 (runtime distribution)" mise install go@1.26.6
-GOV=$(mise exec go@1.26.6 -- go version 2>/dev/null)
-echo "$GOV" | grep -q "go1.26.6" && ok "go runs: $GOV" || bad "go version check (got: $GOV)"
-GOROOT_OUT=$(mise exec go@1.26.6 -- sh -c 'echo $GOROOT' 2>/dev/null)
+check "install golangci-lint@$GCL_V (nested archive, strip=1)" mise install "golangci-lint@$GCL_V"
+mise exec "golangci-lint@$GCL_V" -- golangci-lint version 2>/dev/null | grep -q "$GCL_V" \
+  && ok "golangci-lint runs and reports $GCL_V" || bad "golangci-lint version check"
+check "install glab@$GLAB_V (bin/ layout, strip=0)" mise install "glab@$GLAB_V"
+mise exec "glab@$GLAB_V" -- glab --version 2>/dev/null | grep -qi "$GLAB_V" \
+  && ok "glab runs and reports $GLAB_V" || bad "glab version check"
+check "install go@$GO_V (runtime distribution)" mise install "go@$GO_V"
+GOV=$(mise exec "go@$GO_V" -- go version 2>/dev/null)
+echo "$GOV" | grep -q "go$GO_V" && ok "go runs: $GOV" || bad "go version check (got: $GOV)"
+GOROOT_OUT=$(mise exec "go@$GO_V" -- sh -c 'echo $GOROOT' 2>/dev/null)
 [ -n "$GOROOT_OUT" ] && [ -d "$GOROOT_OUT/src" ] \
   && ok "GOROOT exported and valid ($GOROOT_OUT)" || bad "GOROOT (got: '$GOROOT_OUT')"
 
 echo "== Phase 5: .tool-versions compatibility (asdf golang name) =="
 PROJ="$T/proj"; mkdir -p "$PROJ"
-printf 'golang 1.26.6\ngolangci-lint 2.12.2\n' > "$PROJ/.tool-versions"
-(cd "$PROJ" && mise trust -q 2>/dev/null; V=$(mise exec -- go version 2>/dev/null); echo "$V" | grep -q go1.26.6) \
-  && ok ".tool-versions 'golang 1.26.6' resolves through vault backend" \
+printf "golang $GO_V\ngolangci-lint $GCL_V\n" > "$PROJ/.tool-versions"
+(cd "$PROJ" && mise trust -q 2>/dev/null; V=$(mise exec -- go version 2>/dev/null); echo "$V" | grep -q "go$GO_V") \
+  && ok ".tool-versions 'golang $GO_V' resolves through vault backend" \
   || bad ".tool-versions golang chain"
 
 echo "== Phase 6: fail-closed =="
@@ -199,7 +219,9 @@ SMOKE_BIN=$(mise where smoke@0.0.1 2>/dev/null)/smoke
 [ -x "$SMOKE_BIN" ] && ok "binary installed executable at \$install_path/smoke" \
   || bad "binary install layout (expected executable: $SMOKE_BIN)"
 
-echo "== Phase 8: auto-install behavior (fresh HOME, alias only, no plugin) =="
+echo "== Phase 8: an alias to an uninstalled plugin must NOT auto-install it =="
+# bootstrap pre-installs the plugin because of exactly this behavior;
+# if mise ever starts auto-installing here, bootstrap's assumptions change
 T2=$(mktemp -d /tmp/mise-vault-poc2.XXXXXX)
 HOME="$T2" bash -c '
   mkdir -p "$HOME/.config/mise/conf.d"
@@ -207,10 +229,10 @@ HOME="$T2" bash -c '
   printf "[tool_alias]\nglab = \"vault:glab\"\n" > "$HOME/.config/mise/conf.d/mise-vault.toml"
   mise ls-remote glab
 ' >"$T/autoinstall.log" 2>&1
-if grep -qx "1.113.0" "$T/autoinstall.log"; then
-  ok "EMPIRICAL ANSWER: alias to uninstalled plugin AUTO-INSTALLS (unexpected)"
+if grep -qx "$GLAB_V" "$T/autoinstall.log"; then
+  bad "alias to uninstalled plugin AUTO-INSTALLED — bootstrap's pre-install assumption no longer holds"
 else
-  ok "EMPIRICAL ANSWER: alias to uninstalled plugin does NOT auto-install -> bootstrap must pre-install (log tail: $(tail -1 "$T/autoinstall.log" | head -c 120))"
+  ok "alias to uninstalled plugin does not auto-install (bootstrap must pre-install)"
 fi
 rm -rf "$T2"
 

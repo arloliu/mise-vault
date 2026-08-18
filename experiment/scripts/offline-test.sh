@@ -55,28 +55,42 @@ glab = "vault:glab[nexus_url=http://nexus:8081/repository/devtools]"
 ALIASES
 
 echo "== 2. discovery and install with zero public internet =="
+# expected versions come from the catalog in the bootstrap clone, so approving
+# a new version never requires editing this suite
+GCL_ALL=$(python3 -c "import json,sys; print(' '.join(r['version'] for r in json.load(open(sys.argv[1]))))" \
+  /tmp/bootstrap/catalog/golangci-lint/versions.json)
+GLAB_V=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[-1]['version'])" \
+  /tmp/bootstrap/catalog/glab/versions.json)
+GO_V=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[-1]['version'])" \
+  /tmp/bootstrap/catalog/go/versions.json)
 LSR=$(mise ls-remote golangci-lint 2>/dev/null)
-[ "$(echo $LSR)" = "2.12.1 2.12.2" ] \
+[ "$(echo $LSR)" = "$GCL_ALL" ] \
   && ok "ls-remote == catalog" || bad "ls-remote (got: $(echo $LSR | head -c 80))"
-mise install glab@1.113.0 >/dev/null 2>&1 \
-  && mise exec glab@1.113.0 -- glab --version 2>/dev/null | grep -qi 1.113.0 \
+mise install "glab@$GLAB_V" >/dev/null 2>&1 \
+  && mise exec "glab@$GLAB_V" -- glab --version 2>/dev/null | grep -qi "$GLAB_V" \
   && ok "glab installed and runs (download from private Nexus, sha verified)" \
   || bad "glab install"
-mise install go@1.26.6 >/dev/null 2>&1 \
-  && mise exec go@1.26.6 -- go version 2>/dev/null | grep -q go1.26.6 \
+mise install "go@$GO_V" >/dev/null 2>&1 \
+  && mise exec "go@$GO_V" -- go version 2>/dev/null | grep -q "go$GO_V" \
   && ok "go runtime installed and runs" || bad "go install"
 
 echo "== 3. catalog-only policy holds offline =="
-JQOUT=$(timeout 30 mise ls-remote jq 2>&1 || true)
-echo "$JQOUT" | grep -q "none of its backends" \
-  && ok "uncataloged tool blocked" || bad "jq not blocked ($(echo $JQOUT | head -c 100))"
+# assert the EFFECT (command fails, no versions listed), not mise's wording
+JQRC=0; JQOUT=$(timeout 30 mise ls-remote jq 2>&1) || JQRC=$?
+if [ "$JQRC" -ne 0 ] && ! echo "$JQOUT" | grep -qE '^[0-9]+\.'; then
+  ok "uncataloged tool blocked"
+else
+  bad "jq not blocked (exit=$JQRC; $(echo $JQOUT | head -c 100))"
+fi
 
 echo "== 4. MISE_OFFLINE=1 behavior (documenting, not gating) =="
-MISE_OFFLINE=1 mise ls-remote glab 2>/dev/null | grep -qx 1.113.0 \
+MISE_OFFLINE=1 mise ls-remote glab 2>/dev/null | grep -qx "$GLAB_V" \
   && ok "MISE_OFFLINE=1: ls-remote still serves the local catalog" \
   || bad "MISE_OFFLINE=1 broke catalog listing"
+GCL_V=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[-1]['version'])" \
+  /tmp/bootstrap/catalog/golangci-lint/versions.json)
 rm -rf "$HOME/.local/share/mise/installs/golangci-lint" 2>/dev/null
-if MISE_OFFLINE=1 mise install golangci-lint@2.12.2 >/dev/null 2>&1; then
+if MISE_OFFLINE=1 mise install "golangci-lint@$GCL_V" >/dev/null 2>&1; then
   echo "  INFO  MISE_OFFLINE=1 does NOT block the plugin's own download (curl via cmd)"
 else
   echo "  INFO  MISE_OFFLINE=1 blocks backend-plugin installs"

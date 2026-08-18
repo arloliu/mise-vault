@@ -10,7 +10,7 @@ set -uo pipefail
 
 GITLAB=http://127.0.0.3:8929
 NEXUS=http://127.0.0.2:8081
-PIN_REF=v0.0.14              # any known-good experiment tag; used for pin/re-pin coverage only
+PIN_REF=${EXPERIMENT_PIN_TAG:-v0.0.14}   # any known-good experiment tag; pin/re-pin coverage only
 
 T=$(mktemp -d /tmp/mise-vault-bootstrap.XXXXXX)
 PASS=0; FAIL=0
@@ -36,6 +36,12 @@ write_netrc "$T"
 echo "== 1. documented bootstrap from the default branch (the code under review) =="
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 LOCAL_HEAD=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+# expected versions come from the catalog, so approving a new version never
+# requires editing this suite
+GCL_ALL=$(python3 -c "import json,sys; print(' '.join(r['version'] for r in json.load(open(sys.argv[1]))))" \
+  "$REPO_ROOT/catalog/golangci-lint/versions.json")
+GLAB_V=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[-1]['version'])" \
+  "$REPO_ROOT/catalog/glab/versions.json")
 rm -rf "$T/bootstrap"
 GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 "$GITLAB/devtools/mise-vault.git" "$T/bootstrap" \
   && ok "git clone (default branch) via netrc" || bad "git clone failed"
@@ -76,29 +82,35 @@ grep -q "^glab = 'vault:glab'$" "$T/.config/mise/conf.d/mise-vault.toml" 2>/dev/
 
 echo "== 3. developer experience =="
 LSR=$(mise ls-remote golangci-lint 2>/dev/null)
-[ "$(echo $LSR)" = "2.12.1 2.12.2" ] && ok "mise ls-remote golangci-lint == catalog" || bad "ls-remote (got: $(echo $LSR))"
+[ "$(echo $LSR)" = "$GCL_ALL" ] && ok "mise ls-remote golangci-lint == catalog" || bad "ls-remote (got: $(echo $LSR))"
 PROJ="$T/app"; mkdir -p "$PROJ"
-printf '[tools]\nglab = "1.113.0"\n' > "$PROJ/mise.toml"
-(cd "$PROJ" && mise trust -q 2>/dev/null; mise install >/dev/null 2>&1 && mise exec -- glab --version 2>/dev/null | grep -qi 1.113.0) \
+printf '[tools]\nglab = "%s"\n' "$GLAB_V" > "$PROJ/mise.toml"
+(cd "$PROJ" && mise trust -q 2>/dev/null; mise install >/dev/null 2>&1 && mise exec -- glab --version 2>/dev/null | grep -qi "$GLAB_V") \
   && ok "project mise.toml -> mise install -> glab runs" || bad "project install flow"
 # guard against the public-registry fallback false positive: backend must be ours
 (cd "$PROJ" && mise tool glab 2>/dev/null | grep -q "vault:glab") \
   && ok "glab resolved through vault backend (not public registry)" \
   || bad "glab backend is NOT vault ($(cd "$PROJ" && mise tool glab 2>/dev/null | grep -i backend | head -1))"
 # catalog-only policy: uncataloged names and explicit public backends must fail
-JQOUT=$(timeout 30 mise ls-remote jq 2>&1 || true)
-echo "$JQOUT" | grep -q "none of its backends" \
-  && ok "uncataloged tool (jq) blocked — no public registry reach" \
-  || bad "jq was not blocked ($(echo $JQOUT | head -c 100))"
-AQOUT=$(timeout 30 mise install aqua:jqlang/jq@1.7.1 2>&1 || true)
-echo "$AQOUT" | grep -q "disabled by disable_backends" \
-  && ok "explicit public backend spec refused" \
-  || bad "aqua: spec was not refused ($(echo $AQOUT | head -c 100))"
+# assert the EFFECT (command fails, no versions listed), not mise's exact
+# error wording, which has changed across releases
+JQRC=0; JQOUT=$(timeout 30 mise ls-remote jq 2>&1) || JQRC=$?
+if [ "$JQRC" -ne 0 ] && ! echo "$JQOUT" | grep -qE '^[0-9]+\.'; then
+  ok "uncataloged tool (jq) blocked — no public registry reach"
+else
+  bad "jq was not blocked (exit=$JQRC; $(echo $JQOUT | head -c 100))"
+fi
+AQRC=0; AQOUT=$(timeout 30 mise install aqua:jqlang/jq@1.7.1 2>&1) || AQRC=$?
+if [ "$AQRC" -ne 0 ] && echo "$AQOUT" | grep -qi "disabled"; then
+  ok "explicit public backend spec refused"
+else
+  bad "aqua: spec was not refused (exit=$AQRC; $(echo $AQOUT | head -c 100))"
+fi
 
 echo "== 4. idempotency: run the bootstrap again =="
 "$T/bootstrap/install.sh" > "$T/install2.log" 2>&1 \
   && ok "second bootstrap run exits 0" || bad "second run (log: $(tail -2 "$T/install2.log" | head -c 200))"
-mise ls-remote glab 2>/dev/null | grep -qx 1.113.0 && ok "still functional after re-run" || bad "post re-run state"
+mise ls-remote glab 2>/dev/null | grep -qx "$GLAB_V" && ok "still functional after re-run" || bad "post re-run state"
 
 echo "== 5. vault-sync task (pin to a tag, then back to latest) =="
 rm -f "$T/.config/mise/conf.d/mise-vault.toml"
@@ -113,7 +125,7 @@ rm -f "$T/.config/mise/conf.d/mise-vault.toml"
   || bad "vault-sync with ref (log: $(tail -2 "$T/sync-ref.log" 2>/dev/null | head -c 200))"
 (cd "$T" && mise run vault-sync latest > "$T/sync-latest.log" 2>&1) \
   && grep -q "updating plugin to latest" "$T/sync-latest.log" \
-  && mise ls-remote glab 2>/dev/null | grep -qx 1.113.0 \
+  && mise ls-remote glab 2>/dev/null | grep -qx "$GLAB_V" \
   && ok "'mise run vault-sync latest' updates to default-branch HEAD" \
   || bad "vault-sync latest (log: $(tail -2 "$T/sync-latest.log" 2>/dev/null | head -c 200))"
 
