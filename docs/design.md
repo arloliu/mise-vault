@@ -459,14 +459,14 @@ From the developer's perspective, all of these are simply tools.
 
 # 7. Repository Layout
 
-The initial repository should be self-contained.
+The repository is self-contained.
 
-Suggested structure:
+The implemented structure:
 
 ```text
 mise-vault/
 ├── README.md
-├── LICENSE
+├── AGENTS.md
 ├── install.sh
 ├── metadata.lua
 │
@@ -476,46 +476,39 @@ mise-vault/
 │   └── backend_exec_env.lua
 │
 ├── lib/
-│   ├── catalog.lua
-│   ├── installer.lua
-│   ├── platform.lua
-│   ├── checksum.lua
-│   └── archive.lua
+│   └── common.lua            # shared helpers: catalog loading, platform id, URL building
 │
 ├── catalog/
 │   ├── go/
 │   │   ├── tool.json
 │   │   └── versions.json
-│   │
 │   ├── glab/
 │   │   ├── tool.json
 │   │   └── versions.json
-│   │
-│   ├── golangci-lint/
-│   │   ├── tool.json
-│   │   └── versions.json
-│   │
-│   ├── ripgrep/
-│   │   ├── tool.json
-│   │   └── versions.json
-│   │
-│   └── ruff/
+│   └── golangci-lint/
 │       ├── tool.json
 │       └── versions.json
+│
+├── config/
+│   └── defaults.json          # committed Nexus base URL
 │
 ├── schemas/
 │   ├── tool.schema.json
 │   └── versions.schema.json
 │
 ├── tests/
-│   ├── catalog/
-│   ├── install/
-│   └── fixtures/
+│   ├── fixtures/
+│   │   ├── catalog/           # schema-valid entries that fail at runtime on purpose
+│   │   └── invalid-catalog/   # shapes the validator must reject
+│   └── run-validator-tests
 │
-└── scripts/
-    ├── validate-catalog
-    ├── add-version
-    └── verify-artifacts
+├── scripts/
+│   ├── validate-catalog
+│   ├── add-version
+│   ├── verify-artifacts
+│   └── vault-sync
+│
+└── experiment/                # local Docker stack (Nexus + GitLab) and end-to-end suites
 ```
 
 Do not introduce a separate catalog service for the first version.
@@ -540,12 +533,14 @@ Example for `golangci-lint`:
     "linux-amd64": {
       "artifact": "golangci-lint-{version}-linux-amd64.tar.gz",
       "format": "tar.gz",
-      "binary": "golangci-lint-{version}-linux-amd64/golangci-lint"
+      "strip_components": 1,
+      "bin_paths": ["."]
     },
     "linux-arm64": {
       "artifact": "golangci-lint-{version}-linux-arm64.tar.gz",
       "format": "tar.gz",
-      "binary": "golangci-lint-{version}-linux-arm64/golangci-lint"
+      "strip_components": 1,
+      "bin_paths": ["."]
     }
   }
 }
@@ -620,7 +615,7 @@ type
 supported platforms
 artifact naming rule
 archive format
-binary path or installation layout
+strip depth and bin paths (directories put on PATH)
 ```
 
 Each version record should contain:
@@ -970,8 +965,12 @@ Running it twice should not corrupt an existing installation.
 
 # 16. Bootstrap Security
 
-Do not document a mutable branch as the recommended installation source:
-always clone with `-b <release-tag>`, never `-b main`.
+Cloning the default branch installs the exact commit you cloned —
+every commit on the default branch has passed merge request review and CI,
+so it is always a valid current version.
+Clone with `-b <release-tag>` when you need an immutable pin
+(rollback, reproducible workstation setup);
+`install.sh` self-detects either kind of checkout.
 
 Note that piping the raw file is not an option on a private project anyway:
 GitLab's `/-/raw/` web route rejects every token authentication method.
@@ -993,7 +992,7 @@ and provide a more security-conscious installation variant:
 curl -O <versioned-install-script>
 curl -O <checksum>
 sha256sum -c install.sh.sha256
-sh install.sh
+./install.sh   # run directly or with bash — /bin/sh may be dash, which rejects pipefail
 ```
 
 The convenient `curl | sh` flow may still be available for trusted internal networks.
@@ -1162,7 +1161,7 @@ Perform a real installation through the backend.
 For example:
 
 ```bash
-mise install company:golangci-lint@2.4.1
+mise install vault:golangci-lint@2.4.1
 ```
 
 Then:
@@ -1180,7 +1179,7 @@ The test should confirm that the expected version is executed.
 Verify:
 
 ```bash
-mise ls-remote company:golangci-lint
+mise ls-remote vault:golangci-lint
 ```
 
 contains exactly the catalog-approved versions.
@@ -1211,9 +1210,9 @@ One of the most important usability requirements is hiding the backend namespace
 The backend's native identity may initially look like:
 
 ```text
-company:go
-company:glab
-company:golangci-lint
+vault:go
+vault:glab
+vault:golangci-lint
 ```
 
 but developers should ideally use:
@@ -1227,11 +1226,11 @@ golangci-lint
 The bootstrap process must therefore investigate and implement the cleanest supported mise mechanism for centrally mapping:
 
 ```text
-go            -> company:go
-glab          -> company:glab
-golangci-lint -> company:golangci-lint
-ripgrep       -> company:ripgrep
-ruff          -> company:ruff
+go            -> vault:go
+glab          -> vault:glab
+golangci-lint -> vault:golangci-lint
+ripgrep       -> vault:ripgrep
+ruff          -> vault:ruff
 ```
 
 This is especially important for tools such as `go`, which already have a mise core backend.
@@ -1245,7 +1244,7 @@ mise use go@1.26.0
 over:
 
 ```bash
-mise use company:go@1.26.0
+mise use vault:go@1.26.0
 ```
 
 and should preserve compatibility with existing `.tool-versions` where feasible.
@@ -1816,7 +1815,7 @@ Cover:
 Solve:
 
 ```text
-company:go
+vault:go
       ->
 go
 ```
