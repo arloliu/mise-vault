@@ -39,7 +39,16 @@ services:
       - gitlab-logs:/var/log/gitlab
       - gitlab-data:/var/opt/gitlab
 
+  runner:
+    image: gitlab/gitlab-runner:latest
+    container_name: mv-runner
+    networks: [default]
+    volumes:
+      - runner-config:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+
 volumes:
+  runner-config:
   nexus-data:
   gitlab-config:
   gitlab-logs:

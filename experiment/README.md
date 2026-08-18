@@ -11,8 +11,21 @@ Local Docker stack simulating the private infrastructure that mise-vault targets
 
 ```bash
 docker compose up -d
-./scripts/provision-nexus.sh    # idempotent
-./scripts/provision-gitlab.sh   # idempotent; first GitLab boot takes 3-6 min
+./scripts/provision-nexus.sh          # idempotent
+./scripts/provision-gitlab.sh         # idempotent; first GitLab boot takes 3-6 min
+./scripts/provision-runner.sh         # CI runner + project variables
+./scripts/seed-artifacts.sh           # linux-amd64 artifacts (public internet, once)
+./scripts/seed-extra-platforms.sh     # linux-arm64 + darwin-arm64 artifacts
+
+docker build -t mise-vault-test test-image/   # workstation-like image for offline/CI tests
+```
+
+Test suites:
+
+```bash
+./scripts/poc-test.sh          # plugin behavior matrix
+./scripts/bootstrap-test.sh    # full bootstrap flow
+./scripts/offline-test.sh      # everything again, inside a no-internet network
 ```
 
 ## Credentials (experiment-only, obviously not secrets)

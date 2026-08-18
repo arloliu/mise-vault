@@ -424,3 +424,27 @@ Note: existing pre-release version records were regenerated in place to add plat
 once the catalog is live, platform additions to an existing version
 must instead be a reviewed catalog MR (append-only discipline applies to versions, not platforms —
 tooling support for platform addition is future work).
+
+---
+
+## 17. CI pipeline live (2026-08-18)
+
+A `gitlab-runner` container (docker executor, compose network, clone-url override,
+`if-not-present` pull policy) now runs the real pipeline on the experiment GitLab:
+**all four jobs green** — schema validation with the formal jsonschema engine,
+artifact existence, full checksum verification (15 artifacts),
+and install-test (links the checkout as the plugin,
+asserts `ls-remote` equals the catalog byte-for-byte,
+installs the newest golangci-lint through the backend and executes it).
+
+Issues found only by running it for real:
+
+- YAML: `: ` (colon-space) inside an unquoted script line breaks parsing —
+  and GitLab reports the pipeline as "failed" with zero jobs and `yaml_errors: null`;
+  the actual error only surfaces via the CI lint API.
+- The install-test job needs a `~/.netrc` exactly like a workstation does
+  (the plugin downloads with `curl -n`); it is generated from masked CI variables,
+  with the machine name parsed from the effective Nexus URL.
+- `NEXUS_URL` as a CI variable cleanly re-points both the verify scripts (`--nexus-url`)
+  and the linked plugin (rewrite of the workspace `config/defaults.json`)
+  for networks where Nexus lives under a different address than workstations use.
