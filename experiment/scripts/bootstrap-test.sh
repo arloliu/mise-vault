@@ -5,7 +5,7 @@ set -uo pipefail
 
 GITLAB=http://127.0.0.3:8929
 NEXUS=http://127.0.0.2:8081
-REF=v0.0.11
+REF=v0.0.13
 
 T=$(mktemp -d /tmp/mise-vault-bootstrap.XXXXXX)
 PASS=0; FAIL=0
@@ -31,9 +31,9 @@ rm -rf "$T/bootstrap" \
   && ok "git clone -b $REF + ./install.sh" \
   || { bad "git-based bootstrap (log: $(tail -2 "$T/install1.log" | head -c 200))"; }
 # token-based alternative fetch must also serve the script intact
-curl -fsSL -H "PRIVATE-TOKEN: glpat-mise-vault-dev-000001" \
-    "$GITLAB/api/v4/projects/devtools%2Fmise-vault/repository/files/install.sh/raw?ref=$REF" \
-    | head -1 | grep -q '#!/usr/bin/env bash' \
+RAW=$(curl -fsSL -H "PRIVATE-TOKEN: glpat-mise-vault-dev-000001" \
+    "$GITLAB/api/v4/projects/devtools%2Fmise-vault/repository/files/install.sh/raw?ref=$REF" || true)
+printf '%s' "$RAW" | head -1 | grep -q '#!/usr/bin/env bash' \
   && ok "API+PRIVATE-TOKEN raw fetch returns the script" \
   || bad "API raw fetch alternative"
 

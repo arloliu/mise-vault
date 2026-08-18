@@ -355,8 +355,8 @@ including the `vault-sync <ref>` form that re-pins the plugin and regenerates fr
 | # | Decision | Status |
 |---|---|---|
 | D11 | **Public fallback is fully blocked by policy.** Short names not covered by the generated alias file must not reach mise's public registry. Bootstrap will additionally set the relevant disable settings (`disable_default_registry`, `disable_backends` — exact list to be finalized empirically, since these settings do not cover every backend type), and network-level isolation remains the hard guarantee. | Decided; implementation lands with the offline-gate work |
-| D12 | **install.sh enforces a minimum mise version** — the lowest release supporting every feature we use (backend plugins, `[tool_alias]` + bracketed opts, `gix`/`libgit2` settings, conf.d, global tasks, `#ref` pinning). | Research in flight (`mise-version-floor.md`) |
-| D13 | **Org-wide plugin update/rollback process** | Research in flight (`plugin-rollout-strategies.md`); production `defaults.json` stamping strategy under discussion |
+| D12 | **install.sh enforces a minimum mise version: 2026.8.8.** Binding constraint: the archive extractor's `strip_components` option (added 2026.8.1; rounded up to a hardened patch). Every other dependency is months-to-years older; replacing the extractor call with a tar shell-out would lower the floor to 2026.5.2 (tool-alias option passing) if ever needed. Numeric calver comparison implemented and unit-checked. Details: `mise-version-floor.md`. | **Done** (bootstrap-test 18/18) |
+| D13 | **Org-wide plugin update/rollback process** — superseded by D18 (no rings; latest-or-tag). Research retained as reference: `plugin-rollout-strategies.md`. | Closed |
 
 ---
 

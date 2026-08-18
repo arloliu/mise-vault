@@ -36,6 +36,12 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PLUGIN_NAME=vault
+# Oldest mise release supporting everything this plugin uses. The binding
+# constraint is the strip_components option of the Lua archive extractor
+# (added in mise 2026.8.1; rounded up to a hardened patch release). If an
+# older floor is ever needed, replacing that extractor call with a tar
+# shell-out lowers the requirement to 2026.5.2 (tool-alias option passing).
+MISE_MIN_VERSION="2026.8.8"
 DATA_DIR="${MISE_DATA_DIR:-$HOME/.local/share/mise}"
 PLUGIN_DIR="$DATA_DIR/plugins/$PLUGIN_NAME"
 
@@ -62,7 +68,13 @@ command -v git  >/dev/null || fail "git is required"
 command -v curl >/dev/null || fail "curl is required"
 command -v sha256sum >/dev/null || command -v shasum >/dev/null \
     || fail "sha256sum (Linux) or shasum (macOS) is required"
-say "prerequisites ok (mise $(mise --version 2>/dev/null | head -1))"
+MISE_CURRENT=$(mise --version 2>/dev/null | head -1 | awk '{print $1}')
+# calver comparison must be numeric per component, not lexicographic
+oldest=$(printf '%s\n%s\n' "$MISE_MIN_VERSION" "$MISE_CURRENT" \
+    | sort -t. -k1,1n -k2,2n -k3,3n | head -1)
+[ "$oldest" = "$MISE_MIN_VERSION" ] \
+    || fail "mise $MISE_CURRENT is too old — this plugin needs $MISE_MIN_VERSION or newer (see the company mise onboarding page)"
+say "prerequisites ok (mise $MISE_CURRENT >= $MISE_MIN_VERSION)"
 
 # --- 2. user-scoped settings ----------------------------------------------------
 # `mise settings <key>=<value>` writes to the user's global config.
