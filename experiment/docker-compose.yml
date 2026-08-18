@@ -1,8 +1,14 @@
 name: mise-vault-experiment
 
+# All images can be pulled through a private registry (e.g. an internal
+# Harbor proxy project) by setting REGISTRY_PREFIX in the environment or in
+# an .env file next to this compose file. It must end with a slash:
+#   REGISTRY_PREFIX=harbor.company.example/dockerhub-proxy/
+# Unset, images come from Docker Hub as usual.
+
 services:
   nexus:
-    image: sonatype/nexus3:latest
+    image: ${REGISTRY_PREFIX:-}sonatype/nexus3:latest
     container_name: mv-nexus
     ports:
       - "8081:8081"
@@ -20,7 +26,7 @@ services:
       start_period: 60s
 
   gitlab:
-    image: gitlab/gitlab-ce:latest
+    image: ${REGISTRY_PREFIX:-}gitlab/gitlab-ce:latest
     container_name: mv-gitlab
     hostname: gitlab.local
     ports:
@@ -40,7 +46,7 @@ services:
       - gitlab-data:/var/opt/gitlab
 
   runner:
-    image: gitlab/gitlab-runner:latest
+    image: ${REGISTRY_PREFIX:-}gitlab/gitlab-runner:latest
     container_name: mv-runner
     networks: [default]
     volumes:

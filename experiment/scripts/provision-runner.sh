@@ -8,6 +8,7 @@ set -euo pipefail
 GITLAB_URL=${GITLAB_URL:-http://localhost:8929}
 ROOT_TOKEN=${ROOT_TOKEN:-glpat-mise-vault-root-00001}
 NET=mise-vault-experiment_default
+DEFAULT_JOB_IMAGE=${DEFAULT_JOB_IMAGE:-mise-vault-test}
 log() { printf '>>> %s\n' "$*"; }
 api() { curl -sf -H "PRIVATE-TOKEN: $ROOT_TOKEN" "$@"; }
 
@@ -21,7 +22,7 @@ else
   log "registering runner (docker executor on $NET)"
   docker exec mv-runner gitlab-runner register --non-interactive \
     --url "http://gitlab:8929" --token "$RTOKEN" \
-    --executor docker --docker-image mise-vault-test \
+    --executor docker --docker-image "$DEFAULT_JOB_IMAGE" \
     --docker-network-mode "$NET" \
     --clone-url "http://gitlab:8929" \
     --docker-pull-policy if-not-present

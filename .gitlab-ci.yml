@@ -10,11 +10,17 @@ stages:
 
 variables:
   NEXUS_CURL_OPTS: "-u $NEXUS_CI_USER:$NEXUS_CI_PASSWORD"
+  # Override these (project/group CI variables) to pull through a private
+  # registry, e.g. PYTHON_IMAGE=harbor.company.example/dockerhub-proxy/python:3.12
+  PYTHON_IMAGE: "python:3.12"
+  PYTHON_SLIM_IMAGE: "python:3.12-slim"
+  # pip honors the standard PIP_INDEX_URL environment variable — set it as a
+  # CI variable to install packages from an internal PyPI mirror.
 
 # --- schema + catalog rule validation (no network needed) -------------------
 validate-catalog:
   stage: validate
-  image: python:3.12-slim
+  image: $PYTHON_SLIM_IMAGE
   script:
     - pip install --quiet jsonschema        # formal schema engine in CI
     - scripts/validate-catalog
@@ -28,7 +34,7 @@ validate-catalog:
 # network reaches Nexus under a different address than workstations do.
 verify-artifacts-exist:
   stage: verify
-  image: python:3.12                       # full image ships curl; mirror internally
+  image: $PYTHON_IMAGE                     # full image ships curl
   script:
     - scripts/verify-artifacts ${NEXUS_URL:+--nexus-url $NEXUS_URL}
   rules:
@@ -39,7 +45,7 @@ verify-artifacts-exist:
 # --- full checksum verification (heavier; MRs touching catalog, and tags) ----
 verify-artifacts-checksum:
   stage: verify
-  image: python:3.12                       # full image ships curl; mirror internally
+  image: $PYTHON_IMAGE                     # full image ships curl
   script:
     - scripts/verify-artifacts --checksum ${NEXUS_URL:+--nexus-url $NEXUS_URL}
   rules:

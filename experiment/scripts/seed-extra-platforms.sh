@@ -2,6 +2,9 @@
 # One-time: fetch linux-arm64 and darwin-arm64 artifacts for the seeded tools
 # and upload them to the experiment Nexus. Public internet is used HERE ONLY.
 # Appends to experiment/artifacts.manifest (tool version platform sha256 file).
+# Runs from a network with internet access; behind a corporate proxy, set the
+# standard http_proxy/https_proxy/no_proxy variables — curl and python urllib
+# both honor them.
 set -euo pipefail
 NEXUS_URL=${NEXUS_URL:-http://127.0.0.2:8081}
 AUTH="admin:${ADMIN_NEW_PW:-admin-mise-vault}"

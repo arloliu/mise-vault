@@ -57,6 +57,22 @@ hostnames (e.g. add `nexus.local` / `gitlab.local` to /etc/hosts).
 http://localhost:8081/repository/devtools/<tool>/<version>/<artifact>
 ```
 
+## Private mirror / proxy overrides
+
+Every external fetch point is overridable — nothing requires Docker Hub or
+public package indexes once mirrors exist:
+
+| What | Override | Where |
+|---|---|---|
+| compose images (nexus, gitlab, runner) | `REGISTRY_PREFIX=harbor.../dockerhub-proxy/` | environment or `.env` (see `.env.example`) |
+| test image base | `--build-arg BASE_IMAGE=...` | `docker build test-image/` |
+| test image apt packages | `--build-arg APT_MIRROR=http://mirror.../ubuntu` | `docker build test-image/` |
+| mise binary in test image | `--build-arg MISE_BINARY_URL=...` (hosted binary) or `MISE_INSTALL_URL=...` (mirrored install script) | `docker build test-image/` |
+| CI job images | `PYTHON_IMAGE`, `PYTHON_SLIM_IMAGE`, `DEVTOOLS_CI_IMAGE` | GitLab CI variables |
+| CI pip packages | `PIP_INDEX_URL` | GitLab CI variable (pip reads it natively) |
+| runner default job image | `DEFAULT_JOB_IMAGE=...` | env for `provision-runner.sh` |
+| seed scripts (public intake simulation) | standard `http_proxy`/`https_proxy`/`no_proxy` | environment (curl and python urllib honor them) |
+
 ## Teardown
 
 ```bash

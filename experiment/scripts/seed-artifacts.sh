@@ -4,6 +4,9 @@
 # afterwards the PoC must work entirely against Nexus.
 #
 # Produces experiment/artifacts.manifest:  <tool> <version> <platform> <sha256> <artifact>
+# Runs from a network with internet access; behind a corporate proxy, set the
+# standard http_proxy/https_proxy/no_proxy variables — curl and python urllib
+# both honor them.
 set -euo pipefail
 
 NEXUS_URL=${NEXUS_URL:-http://localhost:8081}

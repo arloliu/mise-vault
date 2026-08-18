@@ -164,6 +164,10 @@ scripts/validate-catalog                  # catalog static validation (no networ
 scripts/verify-artifacts [--checksum]     # catalog vs Nexus (network)
 ```
 
+Every external fetch point (compose images, test-image base/apt/mise, CI job
+images, pip) is overridable toward private mirrors —
+see "Private mirror / proxy overrides" in `experiment/README.md`.
+
 The experiment GitLab hosts a copy of this repository (`devtools/mise-vault`) with version tags;
 after changing plugin code, sync and tag there before re-running the end-to-end suites.
 Credentials for the experiment stack are in `experiment/README.md` (test-only values).
