@@ -97,23 +97,13 @@ docs/              design notes and research (see docs/research/SYNTHESIS.md for
 
 ## Development
 
-See [AGENTS.md](AGENTS.md) for principles, design decisions, and lessons learned.
+**[docs/development.md](docs/development.md)** — environment setup, the development loop,
+test suites, catalog tooling, CI, and troubleshooting.
+[AGENTS.md](AGENTS.md) holds the principles, binding design decisions, and lessons learned.
 
-Local end-to-end environment (Docker):
-
-```bash
-cd experiment
-docker compose up -d
-./scripts/provision-nexus.sh
-./scripts/provision-gitlab.sh     # first boot takes several minutes
-./scripts/seed-artifacts.sh
-```
-
-Test suites (each uses an isolated throwaway HOME):
+Quick start:
 
 ```bash
-./experiment/scripts/poc-test.sh          # plugin behavior matrix
-./experiment/scripts/bootstrap-test.sh    # full bootstrap flow
-scripts/validate-catalog                  # catalog static checks
-scripts/verify-artifacts --checksum       # catalog vs Nexus
+cd experiment && docker compose up -d && ./scripts/provision-nexus.sh && ./scripts/provision-gitlab.sh
+./experiment/scripts/poc-test.sh          # plugin behavior matrix (isolated HOME)
 ```

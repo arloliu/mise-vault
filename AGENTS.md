@@ -32,6 +32,7 @@ scripts/                catalog tooling: add-version, validate-catalog, verify-a
 install.sh              workstation bootstrap (idempotent)
 tests/fixtures/         intentionally broken catalog entries for negative tests
 experiment/             local Docker stack (Nexus + GitLab CE) and end-to-end test suites
+docs/development.md     developer guide: environment, dev loop, test suites, troubleshooting
 docs/design.md          the living design document (amended from the original proposal)
 docs/research/          research notes and the decision log (SYNTHESIS.md)
 tmp/                    scratch area, not part of the deliverable
