@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+# Offline gate: the complete developer flow must work inside a network that can
+# reach ONLY the private GitLab and Nexus — no route to the public internet.
+# Runs offline-suite in a container attached solely to the compose 'isolated'
+# network (internal: true), using the mise-vault-test image. The repository is
+# mounted read-only so the suite and tests/lib come from the working tree.
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+NETWORK = "mise-vault-experiment_isolated"
+IMAGE = "mise-vault-test"
+
+sys.exit(subprocess.call([
+    "docker", "run", "--rm", "--network", NETWORK,
+    "-v", f"{REPO_ROOT}:/repo:ro",
+    IMAGE, "python3", "/repo/experiment/scripts/offline-suite",
+]))

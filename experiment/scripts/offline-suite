@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+# Runs INSIDE the offline container (see offline-test). The container's own
+# HOME is used directly — the container is the isolation boundary here.
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]   # /repo in the container
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+from lib import catalog
+from lib.env import (CONTAINER_MACHINES, GITLAB_CONTAINER_URL,
+                     NEXUS_CONTAINER_URL, write_aliases, write_netrc)
+from lib.harness import Suite, run
+
+HOME = Path(os.environ["HOME"])
+ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+s = Suite("offline-suite")
+write_netrc(HOME, CONTAINER_MACHINES)
+
+s.phase("0. the network really is offline")
+
+r = run(["curl", "-m", "5", "-sf", "https://github.com", "-o", "/dev/null"], env=ENV)
+if r.ok:
+    s.bad("github.com reachable — network is NOT isolated")
+else:
+    s.ok("github.com unreachable")
+
+r = run(["curl", "-m", "5", "-sf", "https://proxy.golang.org", "-o", "/dev/null"], env=ENV)
+if r.ok:
+    s.bad("proxy.golang.org reachable")
+else:
+    s.ok("proxy.golang.org unreachable")
+
+r = run(["curl", "-m", "5", "-sf", f"{GITLAB_CONTAINER_URL}/users/sign_in", "-o", "/dev/null"], env=ENV)
+if r.ok:
+    s.ok("private GitLab reachable")
+else:
+    s.bad("private GitLab NOT reachable")
+
+r = run(["curl", "-m", "5", "-sfn", f"{NEXUS_CONTAINER_URL}/service/rest/v1/status", "-o", "/dev/null"], env=ENV)
+if r.ok:
+    s.ok("private Nexus reachable")
+else:
+    s.bad("private Nexus NOT reachable")
+
+s.phase("1. bootstrap from private GitLab only")
+
+clone_r = run(["git", "clone", "-q", "--depth", "1",
+               f"{GITLAB_CONTAINER_URL}/devtools/mise-vault.git", "/tmp/bootstrap"], env=ENV)
+if clone_r.ok:
+    install_r = run(["/tmp/bootstrap/install.sh"], env=ENV)
+    bootstrap_ok = install_r.ok
+    detail = install_r.tail()
+else:
+    bootstrap_ok = False
+    detail = ""
+if bootstrap_ok:
+    s.ok("git clone + install.sh (netrc, offline network)")
+else:
+    s.bad(f"bootstrap failed: {detail}")
+
+# The committed Nexus URL points at the host-side experiment address, which is
+# not routable in this container. Use the sanctioned per-tool override channel.
+write_aliases(HOME, {
+    t: f"vault:{t}[nexus_url={NEXUS_CONTAINER_URL}/repository/devtools]"
+    for t in ("go", "golangci-lint", "glab")
+})
+
+s.phase("2. discovery and install with zero public internet")
+
+# expected versions come from the catalog in the bootstrap clone, so approving
+# a new version never requires editing this suite
+GCL_ALL = " ".join(catalog.versions("golangci-lint", "/tmp/bootstrap"))
+GLAB_V = catalog.latest("glab", "/tmp/bootstrap")
+GO_V = catalog.latest("go", "/tmp/bootstrap")
+
+r = run(["mise", "ls-remote", "golangci-lint"], env=ENV)
+LSR = " ".join(r.out.split())
+if LSR == GCL_ALL:
+    s.ok("ls-remote == catalog")
+else:
+    s.bad(f"ls-remote (got: {LSR[:80]})")
+
+install_r = run(["mise", "install", f"glab@{GLAB_V}"], env=ENV)
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"glab@{GLAB_V}", "--", "glab", "--version"], env=ENV)
+    glab_ok = exec_r.ok and GLAB_V.lower() in exec_r.out.lower()
+else:
+    glab_ok = False
+if glab_ok:
+    s.ok("glab installed and runs (download from private Nexus, sha verified)")
+else:
+    s.bad("glab install")
+
+install_r = run(["mise", "install", f"go@{GO_V}"], env=ENV)
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"go@{GO_V}", "--", "go", "version"], env=ENV)
+    go_ok = exec_r.ok and f"go{GO_V}" in exec_r.out
+else:
+    go_ok = False
+if go_ok:
+    s.ok("go runtime installed and runs")
+else:
+    s.bad("go install")
+
+s.phase("3. catalog-only policy holds offline")
+
+# assert the EFFECT (command fails, no versions listed), not mise's wording
+r = run(["mise", "ls-remote", "jq"], env=ENV, timeout=30)
+jq_out = r.out + "\n" + r.err
+if not r.ok and not re.search(r'^[0-9]+\.', jq_out, re.MULTILINE):
+    s.ok("uncataloged tool blocked")
+else:
+    s.bad(f"jq not blocked (exit={r.rc}; {jq_out[:100]})")
+
+s.phase("4. MISE_OFFLINE=1 behavior (documenting, not gating)")
+
+r = run(["mise", "ls-remote", "glab"], env={**ENV, "MISE_OFFLINE": "1"})
+if any(line == GLAB_V for line in r.out.splitlines()):
+    s.ok("MISE_OFFLINE=1: ls-remote still serves the local catalog")
+else:
+    s.bad("MISE_OFFLINE=1 broke catalog listing")
+
+GCL_V = catalog.latest("golangci-lint", "/tmp/bootstrap")
+shutil.rmtree(HOME / ".local/share/mise/installs/golangci-lint", ignore_errors=True)
+r = run(["mise", "install", f"golangci-lint@{GCL_V}"], env={**ENV, "MISE_OFFLINE": "1"})
+if r.ok:
+    s.note("MISE_OFFLINE=1 does NOT block the plugin's own download (curl via cmd)")
+else:
+    s.note("MISE_OFFLINE=1 blocks backend-plugin installs")
+
+sys.exit(s.finish())

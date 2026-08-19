@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+# mise-vault PoC test matrix: plugin behavior against the local Docker stack.
+# Runs entirely inside an isolated HOME so the real machine config is untouched.
+#
+# Structure:
+#   Phase 1 exercises the plugin LIFECYCLE (install / re-pin over git + netrc)
+#   using pinned experiment tags (defaults v0.0.3 / v0.0.4; override with
+#   EXPERIMENT_TAG_A / EXPERIMENT_TAG_B).
+#   Phase 2 then links the CURRENT WORKING TREE as the plugin, so every
+#   behavior check from phase 3 on runs the exact code under review —
+#   the reviewed commit is printed and never hidden behind a stale tag.
+#
+# Requires: experiment stack up + provisioned + seeded; the lifecycle tags present.
+import hashlib
+import os
+import shutil
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+from lib import catalog, servers
+from lib.env import GITLAB_HOST_URL, NEXUS_HOST_URL, IsolatedHome
+from lib.harness import Suite, run
+
+# immutable experiment tags used only by the lifecycle phase; override when a
+# fresh experiment GitLab carries different tags
+TAG_A = os.environ.get("EXPERIMENT_TAG_A", "v0.0.3")
+TAG_B = os.environ.get("EXPERIMENT_TAG_B", "v0.0.4")
+PLUGIN_URL = f"{GITLAB_HOST_URL}/devtools/mise-vault.git"
+
+# expected versions come from the working-tree catalog, so approving a new
+# version never requires editing this suite
+GCL_ALL = " ".join(catalog.versions("golangci-lint", REPO_ROOT))
+GCL_V = catalog.latest("golangci-lint", REPO_ROOT)
+GLAB_V = catalog.latest("glab", REPO_ROOT)
+GO_V = catalog.latest("go", REPO_ROOT)
+
+s = Suite("poc-test")
+home = IsolatedHome("mise-vault-poc.")
+
+# the generated conf.d file (aliases + nexus_url option per tool)
+# one alias keeps an explicit URL option to cover the override channel
+ALIASES = {
+    "go": "vault:go",
+    "glab": "vault:glab",
+    "smoke": "vault:smoke",
+    "golangci-lint": f"vault:golangci-lint[nexus_url={NEXUS_HOST_URL}/repository/devtools]",
+}
+home.write_aliases(ALIASES)
+
+
+def link_working_tree():
+    """Copy the working tree's plugin files (plus the two fixture tools)
+    into an isolated plugin dir and link it, so every later check runs
+    the exact code under review."""
+    plug = home.path / "plugin"
+    plug.mkdir()
+    shutil.copy(REPO_ROOT / "metadata.lua", plug / "metadata.lua")
+    for d in ("hooks", "lib", "config", "catalog"):
+        shutil.copytree(REPO_ROOT / d, plug / d)
+    # fixtures: darwin-only (unsupported platform) and smoke (deliberately wrong sha256)
+    for tool in ("darwin-only", "smoke"):
+        shutil.copytree(REPO_ROOT / "tests/fixtures/catalog" / tool, plug / "catalog" / tool)
+    run(["mise", "plugins", "uninstall", "vault"], env=home.env)
+    return plug, run(["mise", "plugins", "link", "vault", str(plug)], env=home.env)
+
+
+s.phase(f"Phase 1: plugin lifecycle over git (netrc, tags {TAG_A} -> {TAG_B})")
+s.check_cmd(f"mise plugin install vault <url>#{TAG_A} via netrc",
+            ["mise", "plugin", "install", "vault", f"{PLUGIN_URL}#{TAG_A}"], env=home.env)
+r = run(["mise", "plugins", "ls"], env=home.env)
+s.check("plugin registered", "vault" in r.out, detail=r.tail())
+r = run(["mise", "ls-remote", "vault:smoke"], env=home.env)
+s.check(f"smoke absent at catalog {TAG_A}", not r.out.strip(), detail=r.tail())
+s.check_cmd(f"plugin re-pin to {TAG_B} (catalog update)",
+            ["mise", "plugin", "install", "-f", "vault", f"{PLUGIN_URL}#{TAG_B}"], env=home.env)
+r = run(["mise", "ls-remote", "smoke"], env=home.env)
+s.check("new tool 'smoke' appears after catalog update", "0.0.1" in r.out.splitlines(), detail=r.tail())
+
+s.phase("Phase 2: link the working tree — everything below tests the code under review")
+reviewed_r = run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"])
+REVIEWED = reviewed_r.out.strip() if reviewed_r.ok else "unknown"
+s.note(f"reviewed commit: {REVIEWED} (plus any uncommitted changes in the working tree)")
+plug, link_r = link_working_tree()
+s.check("working tree linked as the vault plugin", link_r.ok, detail=link_r.tail())
+
+s.phase("Phase 3: version discovery + short-name aliases (catalog only)")
+r = run(["mise", "ls-remote", "vault:golangci-lint"], env=home.env)
+lsr = " ".join(r.out.split())
+s.check(f"ls-remote vault:golangci-lint == exactly catalog ({GCL_ALL})", lsr == GCL_ALL,
+        detail=f"got: {lsr}")
+r = run(["mise", "ls-remote", "golangci-lint"], env=home.env)
+lsr2 = " ".join(r.out.split())
+s.check("ls-remote golangci-lint (short name) routed to vault backend", lsr2 == GCL_ALL,
+        detail=f"got: {lsr2}")
+r = run(["mise", "ls-remote", "go"], env=home.env)
+lsgo_lines = r.out.splitlines()
+s.check("ls-remote go shows only catalog versions (core backend shadowed)",
+        GO_V in lsgo_lines and not any(l.startswith("1.24") for l in lsgo_lines),
+        detail=f"got: {r.out[:120]}")
+
+s.phase("Phase 4: installs (download via curl -n + sha256 + extract)")
+s.check_cmd(f"install golangci-lint@{GCL_V} (nested archive, strip=1)",
+            ["mise", "install", f"golangci-lint@{GCL_V}"], env=home.env)
+r = run(["mise", "exec", f"golangci-lint@{GCL_V}", "--", "golangci-lint", "version"], env=home.env)
+s.check(f"golangci-lint runs and reports {GCL_V}", GCL_V in r.out, detail=r.tail())
+s.check_cmd(f"install glab@{GLAB_V} (bin/ layout, strip=0)",
+            ["mise", "install", f"glab@{GLAB_V}"], env=home.env)
+r = run(["mise", "exec", f"glab@{GLAB_V}", "--", "glab", "--version"], env=home.env)
+s.check(f"glab runs and reports {GLAB_V}", GLAB_V.lower() in r.out.lower(), detail=r.tail())
+s.check_cmd(f"install go@{GO_V} (runtime distribution)",
+            ["mise", "install", f"go@{GO_V}"], env=home.env)
+r = run(["mise", "exec", f"go@{GO_V}", "--", "go", "version"], env=home.env)
+gov = r.out.strip()
+s.check(f"go runs: {gov}", f"go{GO_V}" in gov, detail=f"got: {gov}")
+goroot_r = run(["mise", "exec", f"go@{GO_V}", "--", "sh", "-c", "echo $GOROOT"], env=home.env)
+goroot_out = goroot_r.out.strip()
+s.check(f"GOROOT exported and valid ({goroot_out})",
+        bool(goroot_out) and Path(goroot_out, "src").is_dir(),
+        detail=f"got: '{goroot_out}'")
+
+s.phase("Phase 5: .tool-versions compatibility (asdf golang name)")
+proj = home.path / "proj"
+proj.mkdir(parents=True, exist_ok=True)
+# .tool-versions uses asdf's tool name 'golang', which the plugin must map to 'go'
+(proj / ".tool-versions").write_text(f"golang {GO_V}\ngolangci-lint {GCL_V}\n")
+run(["mise", "trust", "-q"], cwd=str(proj), env=home.env)
+v = run(["mise", "exec", "--", "go", "version"], cwd=str(proj), env=home.env)
+s.check(f".tool-versions 'golang {GO_V}' resolves through vault backend",
+        f"go{GO_V}" in v.out, detail=v.tail())
+
+s.phase("Phase 6: fail-closed")
+s.check_fail("unknown tool rejected (vault:foo)", ["mise", "install", "vault:foo@1.0.0"], env=home.env)
+s.check_fail("unapproved version rejected (golangci-lint@9.9.9)",
+             ["mise", "install", "golangci-lint@9.9.9"], env=home.env)
+r = run(["mise", "install", "vault:darwin-only@1.0.0"], env=home.env)
+s.check("darwin-only tool rejected: not available for linux-amd64",
+        (not r.ok) and "not available for linux-amd64" in (r.out + r.err),
+        detail=f"out: {(r.out + r.err)[:150]}")
+r = run(["mise", "install", "smoke@0.0.1"], env=home.env)
+combined = (r.out + r.err).lower()
+s.check("checksum mismatch aborts install with explicit error",
+        (not r.ok) and ("sha-256" in combined or "sha256" in combined),
+        detail=f"exit={r.rc}; out: {(r.out + r.err)[:150]}")
+
+s.phase("Phase 7: redirect refusal + successful single-binary install")
+# correct the smoke fixture's sha256 in the LINKED catalog so the only thing
+# standing between mise and a successful install is the transport policy
+smoke_tmp = home.path / "smoke-0.0.1.txt"
+r_fetch = run(["curl", "-fsSn", "-o", str(smoke_tmp),
+               f"{NEXUS_HOST_URL}/repository/devtools/smoke/0.0.1/smoke-0.0.1.txt"], env=home.env)
+if r_fetch.ok:
+    real_sha = hashlib.sha256(smoke_tmp.read_bytes()).hexdigest()
+    catalog.set_sha256(plug / "catalog/smoke/versions.json", "linux-amd64", real_sha)
+else:
+    s.bad("could not fetch smoke fixture to compute its sha256", detail=r_fetch.tail())
+redirect_log = home.path / "redirect-requests.log"
+redirect_log.write_text("")
+try:
+    # a server that answers every request with a redirect TO THE REAL NEXUS:
+    # if the plugin followed redirects this install would succeed, so a failure
+    # here proves redirects are refused, not merely that the target was down.
+    # Every request path is appended to a log so the test can prove the plugin
+    # actually reached this server before it failed.
+    with servers.redirect_server(18082, NEXUS_HOST_URL, str(redirect_log)):
+        s.ok("redirect server is up and answering 302")
+        home.write_aliases({**ALIASES,
+            "smoke": "vault:smoke[nexus_url=http://127.0.0.1:18082/repository/devtools]"})
+        r = run(["mise", "install", "smoke@0.0.1"], env=home.env)
+        seen = redirect_log.read_text()
+        combined = (r.out + r.err).lower()
+        s.check("redirect from the artifact server aborts the install (request logged, redirect refused)",
+                (not r.ok) and "smoke-0.0.1.txt" in seen
+                and any(w in combined for w in ("redirect", "unavailable", "could not be downloaded")),
+                detail=f"exit={r.rc}; server saw: {' '.join(seen.split())[:120]}; out: {r.tail()}")
+except (RuntimeError, OSError) as e:
+    s.bad("redirect server did not come up on 127.0.0.1:18082", e)
+home.write_aliases({**ALIASES, "smoke": "vault:smoke"})
+s.check_cmd("install smoke@0.0.1 (single-binary format, correct sha256)",
+            ["mise", "install", "smoke@0.0.1"], env=home.env)
+smoke_where = run(["mise", "where", "smoke@0.0.1"], env=home.env).out.strip()
+smoke_bin = f"{smoke_where}/smoke"
+s.check("binary installed executable at $install_path/smoke",
+        os.access(smoke_bin, os.X_OK),
+        detail=f"expected executable: {smoke_bin}")
+
+s.phase("Phase 8: an alias to an uninstalled plugin must NOT auto-install it")
+# bootstrap pre-installs the plugin because of exactly this behavior;
+# if mise ever starts auto-installing here, bootstrap's assumptions change
+home2 = IsolatedHome("mise-vault-poc2.")
+home2.write_aliases({"glab": "vault:glab"})
+r = run(["mise", "ls-remote", "glab"], env=home2.env)
+s.check("alias to uninstalled plugin does not auto-install (bootstrap must pre-install)",
+        GLAB_V not in (r.out + "\n" + r.err).splitlines(),
+        detail="alias to uninstalled plugin AUTO-INSTALLED — bootstrap's pre-install assumption no longer holds")
+home2.remove()
+
+sys.exit(s.finish(keep_on_failure=[home]))
