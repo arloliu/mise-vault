@@ -92,15 +92,17 @@ git tag v0.0.X && git push experiment v0.0.X
 
 | Suite | Covers | Runtime |
 |---|---|---|
-| `experiment/scripts/poc-test.sh` | plugin behavior matrix: discovery, installs (archive/runtime/binary), aliases, `.tool-versions`, fail-closed paths, redirect refusal, catalog update, unsupported platform | ~2 min |
-| `experiment/scripts/bootstrap-test.sh` | the full new-developer flow: netrc clone, `install.sh` self-detection, generated config, public-backend blocking, idempotency, `vault-sync` | ~2 min |
-| `experiment/scripts/offline-test.sh` | everything again inside a Docker network with **no route to the internet** — the release gate: run it before tagging a release | ~2 min |
+| `experiment/scripts/poc-test` | plugin behavior matrix: discovery, installs (archive/runtime/binary), aliases, `.tool-versions`, fail-closed paths, redirect refusal, catalog update, unsupported platform | ~2 min |
+| `experiment/scripts/bootstrap-test` | the full new-developer flow: netrc clone, `install.sh` self-detection, generated config, public-backend blocking, idempotency, `vault-sync` | ~2 min |
+| `experiment/scripts/offline-test` | everything again inside a Docker network with **no route to the internet** — the release gate: run it before tagging a release | ~2 min |
 | `scripts/validate-catalog` | catalog schema + rules, no network | seconds |
 | `tests/run-validator-tests` | the validator provably REJECTS unsafe catalog shapes (`tests/fixtures/invalid-catalog/`), no network | seconds |
 | `scripts/verify-artifacts --checksum` | every catalog entry exists in Nexus and hashes match (`NEXUS_CURL_OPTS="-u user:pass"` for auth) | ~1 min |
 
+The four test suites are Python on a shared harness in `tests/lib`, verified standalone by `tests/run-harness-selftest`.
+
 What the pass counts vouch for:
-`poc-test.sh` runs its behavior matrix against your **working tree**
+`poc-test` runs its behavior matrix against your **working tree**
 (it links the checkout as the plugin and prints the reviewed commit);
 only its first phase uses pinned experiment tags
 to exercise the install/re-pin lifecycle over git.
@@ -109,7 +111,7 @@ so approving a new version does not require editing the suites;
 the pinned lifecycle tags default to `v0.0.3`/`v0.0.4`/`v0.0.14` and can be
 overridden with `EXPERIMENT_TAG_A`, `EXPERIMENT_TAG_B`, and `EXPERIMENT_PIN_TAG`
 on a freshly provisioned experiment GitLab.
-`bootstrap-test.sh` clones from the experiment GitLab
+`bootstrap-test` clones from the experiment GitLab
 and **fails loudly if its default branch is not your local HEAD** —
 push to the `experiment` remote before running it.
 Each suite prints `RESULT: N passed, M failed` and exits nonzero on any failure.

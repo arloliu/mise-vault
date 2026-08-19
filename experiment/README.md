@@ -23,9 +23,9 @@ docker build -t mise-vault-test test-image/   # workstation-like image for offli
 Test suites:
 
 ```bash
-./scripts/poc-test.sh          # plugin behavior matrix
-./scripts/bootstrap-test.sh    # full bootstrap flow
-./scripts/offline-test.sh      # everything again, inside a no-internet network
+./scripts/poc-test          # plugin behavior matrix
+./scripts/bootstrap-test    # full bootstrap flow
+./scripts/offline-test      # everything again, inside a no-internet network
 ```
 
 ## Credentials (experiment-only, obviously not secrets)

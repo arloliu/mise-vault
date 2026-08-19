@@ -106,5 +106,5 @@ Quick start:
 
 ```bash
 cd experiment && docker compose up -d && ./scripts/provision-nexus.sh && ./scripts/provision-gitlab.sh
-./experiment/scripts/poc-test.sh          # plugin behavior matrix (isolated HOME)
+./experiment/scripts/poc-test          # plugin behavior matrix (isolated HOME)
 ```

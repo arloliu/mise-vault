@@ -31,6 +31,8 @@ schemas/                JSON Schemas for the two catalog file types
 scripts/                catalog tooling: add-version, validate-catalog, verify-artifacts, vault-sync
 install.sh              workstation bootstrap (idempotent)
 tests/fixtures/         intentionally broken catalog entries for negative tests
+tests/lib/              shared python test harness
+tests/run-harness-selftest   self-test for the shared harness
 experiment/             local Docker stack (Nexus + GitLab CE) and end-to-end test suites
 docs/development.md     developer guide: environment, dev loop, test suites, troubleshooting
 docs/design.md          the living design document (amended from the original proposal)
@@ -166,12 +168,12 @@ docker compose up -d
 Test suites (each runs in an isolated throwaway `$HOME`; the real machine config is never touched):
 
 ```bash
-./experiment/scripts/poc-test.sh          # plugin behavior matrix; links the WORKING TREE as the plugin
-./experiment/scripts/bootstrap-test.sh    # full bootstrap flow; asserts experiment GitLab serves local HEAD
-./experiment/scripts/offline-test.sh      # release gate: everything inside a no-internet network
-scripts/validate-catalog                  # catalog static validation (no network)
-tests/run-validator-tests                 # validator must REJECT unsafe catalog shapes (no network)
-scripts/verify-artifacts [--checksum]     # catalog vs Nexus (network)
+./experiment/scripts/poc-test          # plugin behavior matrix; links the WORKING TREE as the plugin
+./experiment/scripts/bootstrap-test    # full bootstrap flow; asserts experiment GitLab serves local HEAD
+./experiment/scripts/offline-test      # release gate: everything inside a no-internet network
+scripts/validate-catalog               # catalog static validation (no network)
+tests/run-validator-tests              # validator must REJECT unsafe catalog shapes (no network)
+scripts/verify-artifacts [--checksum]  # catalog vs Nexus (network)
 ```
 
 Every external fetch point (compose images, test-image base/apt/mise, CI job

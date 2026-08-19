@@ -500,6 +500,8 @@ mise-vault/
 │   ├── fixtures/
 │   │   ├── catalog/           # schema-valid entries that fail at runtime on purpose
 │   │   └── invalid-catalog/   # shapes the validator must reject
+│   ├── lib/                   # shared python test harness
+│   ├── run-harness-selftest
 │   └── run-validator-tests
 │
 ├── scripts/
