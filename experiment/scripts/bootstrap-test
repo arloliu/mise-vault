@@ -191,4 +191,33 @@ else:
         s.ok(f"tagged checkout ({PIN_REF}) bootstraps, self-detects the tag, and serves the catalog")
 tag_home.remove()
 
+s.phase("7. plugin-install entry path (documented first method, separate HOME)")
+
+# the one-shot env vars solve the chicken-and-egg problem: the real git binary
+# (the only one that reads netrc) must be selected before install.sh has
+# written the persistent gix/libgit2 settings
+pi_home = IsolatedHome("mise-vault-bootstrap-pi.", write_settings=False)
+pi_env = {**pi_home.env, "MISE_GIX": "false", "MISE_LIBGIT2": "false"}
+r = run(["mise", "plugin", "install", "vault",
+         f"{GITLAB_HOST_URL}/devtools/mise-vault.git"], env=pi_env)
+s.check("mise plugin install with one-shot MISE_GIX/MISE_LIBGIT2 env vars", r.ok,
+        detail=r.tail())
+pi_script = pi_home.path / ".local/share/mise/plugins/vault/install.sh"
+# install.sh runs WITHOUT the env vars: it must persist the settings itself
+r = run(["bash", str(pi_script)], env=pi_home.env)
+s.check("cloned checkout's install.sh completes without the env vars", r.ok,
+        detail=r.tail())
+gix_r = run(["mise", "settings", "gix"], env=pi_home.env)
+lg2_r = run(["mise", "settings", "libgit2"], env=pi_home.env)
+s.check("settings persisted by install.sh (gix/libgit2 false)",
+        "false" in gix_r.out and "false" in lg2_r.out,
+        detail=f"gix: {gix_r.out.strip()}, libgit2: {lg2_r.out.strip()}")
+tool_r = run(["mise", "tool", "glab"], env=pi_home.env)
+s.check("glab resolves through vault backend", "vault:glab" in tool_r.out,
+        detail=tool_r.tail())
+lsr_r = run(["mise", "ls-remote", "golangci-lint"], env=pi_home.env)
+s.check("ls-remote == catalog after plugin-install bootstrap",
+        " ".join(lsr_r.out.split()) == GCL_ALL, detail=lsr_r.tail())
+pi_home.remove()
+
 sys.exit(s.finish(keep_on_failure=[home]))
