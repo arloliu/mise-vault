@@ -19,6 +19,24 @@ ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 s = Suite("offline-suite")
 write_netrc(HOME, CONTAINER_MACHINES)
 
+
+def safe_versions(tool, root):
+    """A failed check must never abort the suite: if the bootstrap clone
+    failed or its catalog is unreadable, fall back to an empty sentinel so
+    the checks that depend on it simply fail in the normal way, and every
+    later phase still runs through to the final summary."""
+    try:
+        return catalog.versions(tool, root)
+    except (OSError, ValueError):
+        return []
+
+
+def safe_latest(tool, root):
+    try:
+        return catalog.latest(tool, root)
+    except (OSError, ValueError, IndexError, KeyError):
+        return ""
+
 s.phase("0. the network really is offline")
 
 r = run(["curl", "-m", "5", "-sf", "https://github.com", "-o", "/dev/null"], env=ENV)
@@ -72,13 +90,13 @@ s.phase("2. discovery and install with zero public internet")
 
 # expected versions come from the catalog in the bootstrap clone, so approving
 # a new version never requires editing this suite
-GCL_ALL = " ".join(catalog.versions("golangci-lint", "/tmp/bootstrap"))
-GLAB_V = catalog.latest("glab", "/tmp/bootstrap")
-GO_V = catalog.latest("go", "/tmp/bootstrap")
+GCL_ALL = " ".join(safe_versions("golangci-lint", "/tmp/bootstrap"))
+GLAB_V = safe_latest("glab", "/tmp/bootstrap")
+GO_V = safe_latest("go", "/tmp/bootstrap")
 
 r = run(["mise", "ls-remote", "golangci-lint"], env=ENV)
 LSR = " ".join(r.out.split())
-if LSR == GCL_ALL:
+if GCL_ALL and LSR == GCL_ALL:
     s.ok("ls-remote == catalog")
 else:
     s.bad(f"ls-remote (got: {LSR[:80]})")
@@ -86,7 +104,7 @@ else:
 install_r = run(["mise", "install", f"glab@{GLAB_V}"], env=ENV)
 if install_r.ok:
     exec_r = run(["mise", "exec", f"glab@{GLAB_V}", "--", "glab", "--version"], env=ENV)
-    glab_ok = exec_r.ok and GLAB_V.lower() in exec_r.out.lower()
+    glab_ok = bool(GLAB_V) and exec_r.ok and GLAB_V.lower() in exec_r.out.lower()
 else:
     glab_ok = False
 if glab_ok:
@@ -97,7 +115,7 @@ else:
 install_r = run(["mise", "install", f"go@{GO_V}"], env=ENV)
 if install_r.ok:
     exec_r = run(["mise", "exec", f"go@{GO_V}", "--", "go", "version"], env=ENV)
-    go_ok = exec_r.ok and f"go{GO_V}" in exec_r.out
+    go_ok = bool(GO_V) and exec_r.ok and f"go{GO_V}" in exec_r.out
 else:
     go_ok = False
 if go_ok:
@@ -118,12 +136,12 @@ else:
 s.phase("4. MISE_OFFLINE=1 behavior (documenting, not gating)")
 
 r = run(["mise", "ls-remote", "glab"], env={**ENV, "MISE_OFFLINE": "1"})
-if any(line == GLAB_V for line in r.out.splitlines()):
+if GLAB_V and any(line == GLAB_V for line in r.out.splitlines()):
     s.ok("MISE_OFFLINE=1: ls-remote still serves the local catalog")
 else:
     s.bad("MISE_OFFLINE=1 broke catalog listing")
 
-GCL_V = catalog.latest("golangci-lint", "/tmp/bootstrap")
+GCL_V = safe_latest("golangci-lint", "/tmp/bootstrap")
 shutil.rmtree(HOME / ".local/share/mise/installs/golangci-lint", ignore_errors=True)
 r = run(["mise", "install", f"golangci-lint@{GCL_V}"], env={**ENV, "MISE_OFFLINE": "1"})
 if r.ok:
