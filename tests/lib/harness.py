@@ -84,7 +84,7 @@ class Suite:
     def check_fail(self, desc, cmd, **run_kwargs):
         """The command must fail (fail-closed paths)."""
         r = run(cmd, **run_kwargs)
-        self.check(desc, not r.ok, detail=f"unexpectedly succeeded; {r.tail()}")
+        self.check(desc, not r.ok, detail=f"unexpectedly succeeded (exit={r.rc}); {r.tail()}")
         return r
 
     def note(self, text, tag="INFO"):

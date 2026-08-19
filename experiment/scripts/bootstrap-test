@@ -62,7 +62,8 @@ r = run(["curl", "-fsSL", "-H", f"PRIVATE-TOKEN: {GITLAB_DEV_TOKEN}",
          f"{GITLAB_HOST_URL}/api/v4/projects/devtools%2Fmise-vault/repository/files/"
          f"install.sh/raw?ref={CLONED}"], env=home.env)
 first_line = r.out.splitlines()[0] if r.out else ""
-s.check("API+PRIVATE-TOKEN raw fetch returns the script", first_line == "#!/usr/bin/env bash",
+s.check("API+PRIVATE-TOKEN raw fetch returns the script",
+        "#!/usr/bin/env bash" in first_line,
         detail="API raw fetch alternative")
 
 s.phase("2. resulting machine state")

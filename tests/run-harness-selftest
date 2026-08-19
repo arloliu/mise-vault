@@ -60,6 +60,18 @@ with redirect_stdout(buf):
     rc2 = s2.finish()
 expect("Suite: all-pass makes finish() return 0", rc2 == 0)
 
+# check_fail() must report the exit code of a command that unexpectedly
+# succeeded, not just the output tail — a new inner suite, so it doesn't
+# disturb the counts already asserted above.
+buf = io.StringIO()
+with redirect_stdout(buf):
+    s2b = Suite("selftest-inner2b")
+    s2b.check_fail("must fail but succeeds", ["true"])
+    s2b.finish()
+out2b = buf.getvalue()
+expect("Suite: check_fail() reports the exit code of an unexpected success",
+       "exit=0" in out2b)
+
 # --- IsolatedHome ---
 home = env.IsolatedHome("selftest.")
 netrc = home.path / ".netrc"
