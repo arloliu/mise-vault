@@ -93,7 +93,7 @@ git tag v0.0.X && git push experiment v0.0.X
 | Suite | Covers | Runtime |
 |---|---|---|
 | `experiment/scripts/poc-test` | plugin behavior matrix: discovery, installs (archive/runtime/binary), aliases, `.tool-versions`, fail-closed paths, redirect refusal, catalog update, unsupported platform | ~2 min |
-| `experiment/scripts/bootstrap-test` | the full new-developer flow: netrc clone, `install.sh` self-detection, generated config, public-backend blocking, idempotency, `vault-sync` | ~2 min |
+| `experiment/scripts/bootstrap-test` | the full new-developer flow: netrc clone, `install.sh` self-detection, generated config, public-backend blocking, idempotency, `vault-sync`, and the plugin-install entry path | ~2 min |
 | `experiment/scripts/offline-test` | everything again inside a Docker network with **no route to the internet** — the release gate: run it before tagging a release | ~2 min |
 | `scripts/validate-catalog` | catalog schema + rules, no network | seconds |
 | `tests/run-validator-tests` | the validator provably REJECTS unsafe catalog shapes (`tests/fixtures/invalid-catalog/`), no network | seconds |

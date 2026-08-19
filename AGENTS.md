@@ -99,8 +99,16 @@ The operative rules:
   a checksum stored next to the artifact it describes proves nothing if the store is compromised.
 - `install.sh` enforces mise >= 2026.8.1
   (set by the archive extractor's `strip_components` support; numeric calver comparison).
-- Bootstrap is git-based (`git clone --depth 1 -b <tag>` then run `install.sh`),
-  not `curl | sh` — see the GitLab raw-route lesson below.
+- Every bootstrap path ends in the same `install.sh`.
+  Documented entry paths, in order:
+  (1) `MISE_GIX=false MISE_LIBGIT2=false mise plugin install vault <url>[#<tag>]`,
+  then run the cloned checkout's `install.sh`
+  (the one-shot env vars select the real git binary, which reads netrc,
+  before the settings file exists — install.sh then persists those settings);
+  (2) token-based fetch of `install.sh` via the GitLab files API with a `PRIVATE-TOKEN` header
+  (never the `/-/raw/` web route — see the lesson below),
+  driven by `MISE_VAULT_REF` / `MISE_VAULT_REPO_URL`;
+  (3) `git clone --depth 1 [-b <tag>]`, then run `install.sh`.
   `install.sh` self-detects the version and repository URL from the checkout it runs in:
   a tagged checkout installs that tag, a branch checkout installs the exact cloned commit.
   Every commit on the default branch is a valid current version
@@ -113,6 +121,9 @@ The operative rules:
 - **mise clones plugins with a built-in Rust git by default.**
   netrc and credential helpers only work after setting `gix = false` AND `libgit2 = false`
   (the code path is selected by OR of the two settings).
+  Both accept mise's settings env-var form —
+  `MISE_GIX=false MISE_LIBGIT2=false` works for a first run before any settings file exists,
+  and `mise settings get` reflects them.
 - **`os.getenv` inside plugin Lua hooks DOES read the real environment**
   (verified empirically in both `BackendListVersions` and `BackendInstall`):
   shell exports and plain `[env]` entries from a trusted mise.toml are both visible.
