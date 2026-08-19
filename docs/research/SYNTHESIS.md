@@ -448,3 +448,12 @@ Issues found only by running it for real:
 - `NEXUS_URL` as a CI variable cleanly re-points both the verify scripts (`--nexus-url`)
   and the linked plugin (rewrite of the workspace `config/defaults.json`)
   for networks where Nexus lives under a different address than workstations use.
+
+---
+
+## 18. Env-var override + official plugin-install path (2026-08-19, empirical)
+
+| # | Decision |
+|---|---|
+| D19 | **`MISE_VAULT_NEXUS_URL` is a supported override channel**, highest precedence: env var > per-tool `nexus_url` option > `config/defaults.json`. The PoC that D6 deferred was finally run (instrumented hooks, isolated `$HOME`, mise 2026.8.8): `os.getenv` in `BackendListVersions` AND `BackendInstall` sees plain shell exports and plain `[env]` entries from a trusted mise.toml — the source-derived "sanitized `mise_env` table" conclusion does not hold empirically (correction recorded in `plugin-hooks-and-config-channels.md`; D6's option-over-default ordering itself is unchanged). The env value passes the same URL-shape validation as every other channel. Covered by poc-test phase 5: env beats the alias option in both failure and success directions, the `[env]`-in-mise.toml channel reaches the hook, and an unsafe value is refused. |
+| D20 | **`mise plugin install vault <url>` cannot replace the git-clone bootstrap for first install.** Empirical against the experiment GitLab: with netrc but WITHOUT `gix = false` + `libgit2 = false` it fails ("Failed to obtain credentials" — the built-in gix ignores netrc); embedding the token in the URL also fails over http ("Will not send credentials in clear text over http"), and would persist the token into the plugin's `.git/config` anyway, violating the no-credentials-in-files rule. With the two settings plus netrc it succeeds — but writing those settings, the netrc guidance, blocking public backends, generating aliases, and the mise version floor are exactly what `install.sh` provides, and an alias to an uninstalled plugin does not auto-install it. The official command remains a fine re-pin/update path AFTER bootstrap (poc-test phase 1 exercises it). |
