@@ -24,6 +24,7 @@ and the closing validation is skipped.
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -31,13 +32,25 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "scripts"
 
+# Tool and version names must match the same grammar scripts/validate-catalog
+# enforces for catalog entries. A spec that fails either check is rejected
+# outright, so a path-bearing "name" like go/../glab can never be treated as
+# a plain tool and silently resolve into another tool's catalog directory.
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]*$")
+
 
 def parse_spec(spec):
-    """Split tool@version; a malformed spec is reported, not guessed at."""
+    """Split tool@version and check both halves against the catalog name
+    grammar; a malformed spec is reported, not guessed at."""
     tool, sep, version = spec.partition("@")
     if not sep or not tool or not version or "@" in version:
-        return None, None
-    return tool, version
+        return None, None, None
+    if not NAME_RE.match(tool):
+        return None, None, "invalid tool name"
+    if not VERSION_RE.match(version):
+        return None, None, "invalid version"
+    return tool, version, None
 
 
 def preflight(specs, catalog_dir):
@@ -49,15 +62,28 @@ def preflight(specs, catalog_dir):
     problems = []
     pairs = []
     seen = set()
+    catalog_root = Path(catalog_dir).resolve()
     for spec in specs:
-        tool, version = parse_spec(spec)
+        tool, version, reason = parse_spec(spec)
         if tool is None:
-            problems.append(f"malformed spec '{spec}' — expected tool@version")
+            msg = f"malformed spec '{spec}' — expected tool@version"
+            if reason:
+                msg += f" ({reason})"
+            problems.append(msg)
             continue
-        if (tool, version) in seen:
+
+        # Defense in depth: even a grammar-valid tool name must resolve to a
+        # direct child of the catalog directory, never anywhere else.
+        tool_dir = (Path(catalog_dir) / tool).resolve()
+        if tool_dir.parent != catalog_root:
+            problems.append(f"malformed spec '{spec}' — tool name escapes the catalog directory")
+            continue
+
+        canonical = (str(tool_dir), version)
+        if canonical in seen:
             problems.append(f"duplicate spec '{spec}'")
             continue
-        seen.add((tool, version))
+        seen.add(canonical)
 
         tool_file = Path(catalog_dir) / tool / "tool.json"
         if not tool_file.exists():
@@ -113,9 +139,12 @@ def main():
             remaining = [f"{t}@{v}" for t, v in pairs[index + 1:]]
             print(f"\napprove: FAILED at {tool}@{version}", file=sys.stderr)
             if done:
-                print(f"already appended (each individually verified, kept): "
-                      f"{', '.join(done)}", file=sys.stderr)
-                print("to undo everything: git checkout -- catalog/", file=sys.stderr)
+                if args.dry_run:
+                    print(f"rehearsed, nothing written: {', '.join(done)}", file=sys.stderr)
+                else:
+                    print(f"already appended (each individually verified, kept): "
+                          f"{', '.join(done)}", file=sys.stderr)
+                    print("to undo everything: git checkout -- catalog/", file=sys.stderr)
             if remaining:
                 print(f"not attempted: {', '.join(remaining)}", file=sys.stderr)
             sys.exit(1)
