@@ -505,6 +505,7 @@ mise-vault/
 │   └── run-validator-tests
 │
 ├── scripts/
+│   ├── approve
 │   ├── validate-catalog
 │   ├── add-version
 │   ├── verify-artifacts
