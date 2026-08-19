@@ -28,7 +28,7 @@ lib/common.lua          shared helpers: catalog loading, platform id, URL buildi
 catalog/<tool>/         tool.json (packaging) + versions.json (approved versions + sha256)
 config/defaults.json    default Nexus base URL
 schemas/                JSON Schemas for the two catalog file types
-scripts/                catalog tooling: add-version, validate-catalog, verify-artifacts, vault-sync
+scripts/                catalog tooling: approve, add-version, validate-catalog, verify-artifacts, vault-sync
 install.sh              workstation bootstrap (idempotent)
 tests/fixtures/         intentionally broken catalog entries for negative tests
 tests/lib/              shared python test harness

@@ -158,13 +158,23 @@ under `<nexus_url>/<tool>/<version>/<artifact-file>`
 (upload is a separate, admin-side step — this repository only records approvals).
 
 ```bash
-scripts/add-version <tool> <version>   # e.g. scripts/add-version golangci-lint 2.12.3
-scripts/validate-catalog
-scripts/verify-artifacts --checksum --tool <tool>
+scripts/approve <tool>@<version> [<tool>@<version> ...]
+# e.g. scripts/approve golangci-lint@2.12.3 glab@1.55.0
 ```
 
-`add-version --dry-run` prints the record it would append without touching
-`versions.json` — useful the first time you approve a version for a new tool.
+One command runs the whole flow:
+it pre-flights every spec (nothing is written unless the whole batch parses and is new),
+appends each record via `add-version` (fail-fast: the first failure stops the batch,
+already-appended records are each individually verified and stay in place),
+then runs `validate-catalog` and `verify-artifacts --checksum` for the touched tools
+and prints the suggested git commands.
+
+`approve --dry-run` rehearses the whole batch (artifact existence and checksums included)
+without touching `versions.json` — useful the first time you approve a version for a new tool.
+
+The underlying single-spec engine is still available
+(`scripts/add-version <tool> <version>` plus the validate/verify commands it prints),
+and everything below describes its behavior — `approve` adds batching and orchestration only.
 
 `add-version` does three things, all fail-closed:
 
@@ -220,12 +230,10 @@ Then open a merge request with the diff — it should be one small appended reco
    - `env` (optional): extra environment variables;
      `{install_path}` and `{version}` are substituted (e.g. `"GOROOT": "{install_path}"`).
 
-3. Approve the first version and validate — same commands as above:
+3. Approve the first version and validate — same command as above:
 
    ```bash
-   scripts/add-version <tool> <version>
-   scripts/validate-catalog
-   scripts/verify-artifacts --checksum --tool <tool>
+   scripts/approve <tool>@<version>
    ```
 
 4. Smoke it end-to-end against your working tree

@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Approve one or more tool versions in a single command.
+
+Each argument is a tool@version spec, for example:
+
+  scripts/approve golangci-lint@2.12.3 glab@1.55.0 go@1.26.1
+
+The command runs the whole approval flow and stops before git:
+
+  1. pre-flight every spec (spec syntax, tool exists in the catalog,
+     version not already approved, no duplicates in the batch) —
+     nothing is written until the whole batch passes this stage,
+  2. run scripts/add-version for each spec, in order, fail-fast:
+     the first failure stops the batch; records already appended are
+     each individually verified and stay in place (git shows the diff,
+     and `git checkout -- catalog/` resets everything),
+  3. on full success, run scripts/validate-catalog once and
+     scripts/verify-artifacts --checksum for every touched tool,
+     then print the suggested git commands.
+
+--dry-run is passed through to every add-version call: the whole batch
+is rehearsed (artifact existence and checksums included) with no writes,
+and the closing validation is skipped.
+"""
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = REPO / "scripts"
+
+
+def parse_spec(spec):
+    """Split tool@version; a malformed spec is reported, not guessed at."""
+    tool, sep, version = spec.partition("@")
+    if not sep or not tool or not version or "@" in version:
+        return None, None
+    return tool, version
+
+
+def preflight(specs, catalog_dir):
+    """Validate the whole batch before anything is written.
+
+    Returns a list of (tool, version) pairs, or exits listing every
+    problem found — a batch with one bad spec makes no changes at all.
+    """
+    problems = []
+    pairs = []
+    seen = set()
+    for spec in specs:
+        tool, version = parse_spec(spec)
+        if tool is None:
+            problems.append(f"malformed spec '{spec}' — expected tool@version")
+            continue
+        if (tool, version) in seen:
+            problems.append(f"duplicate spec '{spec}'")
+            continue
+        seen.add((tool, version))
+
+        tool_file = Path(catalog_dir) / tool / "tool.json"
+        if not tool_file.exists():
+            problems.append(f"unknown tool '{tool}' — no {tool_file}")
+            continue
+        versions_file = Path(catalog_dir) / tool / "versions.json"
+        if versions_file.exists():
+            try:
+                records = json.loads(versions_file.read_text())
+            except json.JSONDecodeError as err:
+                problems.append(f"{versions_file} is not valid JSON ({err})")
+                continue
+            if any(rec.get("version") == version for rec in records):
+                problems.append(f"{tool} {version} already in catalog (records are immutable)")
+                continue
+        pairs.append((tool, version))
+    if problems:
+        for p in problems:
+            print(f"error: {p}", file=sys.stderr)
+        sys.exit(f"approve: {len(problems)} problem(s) found, nothing was changed")
+    return pairs
+
+
+def run_step(argv):
+    """Run a catalog script with live output; return its exit code."""
+    print(f"\n$ {' '.join(argv)}", flush=True)
+    return subprocess.run(argv).returncode
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        usage="scripts/approve tool@version [tool@version ...] "
+              "[--nexus-url URL] [--catalog-dir DIR] [--dry-run]")
+    ap.add_argument("specs", nargs="+", metavar="tool@version")
+    ap.add_argument("--nexus-url")
+    ap.add_argument("--catalog-dir", default=str(REPO / "catalog"))
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    passthrough = []
+    if args.nexus_url:
+        passthrough += ["--nexus-url", args.nexus_url]
+    passthrough += ["--catalog-dir", args.catalog_dir]
+
+    pairs = preflight(args.specs, args.catalog_dir)
+
+    done = []
+    for index, (tool, version) in enumerate(pairs):
+        argv = [str(SCRIPTS / "add-version"), tool, version, *passthrough]
+        if args.dry_run:
+            argv.append("--dry-run")
+        if run_step(argv) != 0:
+            remaining = [f"{t}@{v}" for t, v in pairs[index + 1:]]
+            print(f"\napprove: FAILED at {tool}@{version}", file=sys.stderr)
+            if done:
+                print(f"already appended (each individually verified, kept): "
+                      f"{', '.join(done)}", file=sys.stderr)
+                print("to undo everything: git checkout -- catalog/", file=sys.stderr)
+            if remaining:
+                print(f"not attempted: {', '.join(remaining)}", file=sys.stderr)
+            sys.exit(1)
+        done.append(f"{tool}@{version}")
+
+    if args.dry_run:
+        print(f"\napprove: --dry-run rehearsed {len(done)} spec(s), nothing written: "
+              f"{', '.join(done)}")
+        return
+
+    if run_step([str(SCRIPTS / "validate-catalog"),
+                 "--catalog-dir", args.catalog_dir]) != 0:
+        sys.exit("approve: validate-catalog failed on the updated catalog — "
+                 "fix or reset (git checkout -- catalog/) before committing")
+
+    verify = [str(SCRIPTS / "verify-artifacts"), "--checksum", *passthrough]
+    for tool in sorted({t for t, _ in pairs}):
+        verify += ["--tool", tool]
+    if run_step(verify) != 0:
+        sys.exit("approve: verify-artifacts failed — do not commit until resolved")
+
+    print(f"\napprove: {len(done)} version(s) approved and verified: {', '.join(done)}")
+    if Path(args.catalog_dir).resolve() != (REPO / "catalog").resolve():
+        print(f"note: changes were made under {args.catalog_dir}, not the repo catalog")
+        return
+    summary = ", ".join(f"{t} {v}" for t, v in pairs)
+    branch = "catalog/approve-" + "-".join(t for t, _ in pairs[:2]) \
+        + ("-more" if len(pairs) > 2 else "")
+    print("next, commit and open the merge request:")
+    print(f"  git checkout -b {branch}")
+    print(f"  git add catalog/")
+    print(f"  git commit -m 'feat: approve {summary}'")
+
+
+if __name__ == "__main__":
+    main()
