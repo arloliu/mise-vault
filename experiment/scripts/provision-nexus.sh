@@ -4,8 +4,24 @@
 # What it does:
 #   1. Wait for Nexus to come up.
 #   2. Rotate the generated admin password to a known value.
-#   3. Disable anonymous read (we explicitly want to exercise authenticated reads).
+#   3. Disable anonymous read (we explicitly want to exercise authenticated reads
+#      on the artifact repository).
 #   4. Create a raw hosted repository `devtools` (writePolicy ALLOW_ONCE = immutable).
+#   4b. Create a go proxy repository caching proxy.golang.org, for
+#       go-installed tools, and re-enable anonymous access scoped to READ
+#       ONLY THAT REPOSITORY.
+#       This is required, not just convenient.
+#       The go command's netrc-based auth only ever activates for an
+#       https:// module proxy (verified by reading
+#       cmd/go/internal/web/http.go in the installed toolchain — it calls
+#       the credential lookup only when the request scheme is "https"),
+#       and this experiment — like the real Nexus this simulates — serves
+#       plain http.
+#       Content behind this repository is every approved version's source,
+#       mirrored read-only from the public go proxy.
+#       The security boundary stays the approved-version list in the
+#       catalog, so making the mirror itself world-readable gives
+#       nothing away.
 #   5. Create a read-only role + `developer` user (simulates workstation credentials).
 #   6. Upload a smoke artifact as admin, download it back as developer, verify sha256.
 set -euo pipefail
@@ -73,6 +89,73 @@ else
   log "created raw hosted repository '$REPO' (immutable: ALLOW_ONCE)"
 fi
 
+# --- 4b. go proxy repository (caches proxy.golang.org for go-installed tools) ---
+GO_PROXY_REPO=go-proxy
+GO_PROXY_REMOTE=${GO_PROXY_REMOTE:-https://proxy.golang.org}
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/repositories/go/proxy/$GO_PROXY_REPO" >/dev/null 2>&1; then
+  log "repository '$GO_PROXY_REPO' already exists"
+else
+  curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/repositories/go/proxy" \
+    -H 'Content-Type: application/json' -d "{
+      \"name\": \"$GO_PROXY_REPO\",
+      \"online\": true,
+      \"storage\": {
+        \"blobStoreName\": \"default\",
+        \"strictContentTypeValidation\": true
+      },
+      \"proxy\": {
+        \"remoteUrl\": \"$GO_PROXY_REMOTE\",
+        \"contentMaxAge\": 1440,
+        \"metadataMaxAge\": 1440
+      },
+      \"negativeCache\": {
+        \"enabled\": true,
+        \"timeToLive\": 1440
+      },
+      \"httpClient\": {
+        \"blocked\": false,
+        \"autoBlock\": true
+      }
+    }"
+  log "created go proxy repository '$GO_PROXY_REPO' (caches $GO_PROXY_REMOTE)"
+fi
+
+# --- 4c. anonymous read, scoped to ONLY the go proxy repository -------------
+# Nexus's built-in "nx-anonymous" role cannot be narrowed (it is read-only
+# and already grants read on every repository), so the anonymous user is
+# switched to a role this script owns instead of that built-in one.
+GO_PROXY_ANON_ROLE=go-proxy-anon-read
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/$GO_PROXY_ANON_ROLE" >/dev/null 2>&1; then
+  log "role $GO_PROXY_ANON_ROLE already exists"
+else
+  curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/security/roles" \
+    -H 'Content-Type: application/json' -d "{
+      \"id\": \"$GO_PROXY_ANON_ROLE\",
+      \"name\": \"$GO_PROXY_ANON_ROLE\",
+      \"description\": \"anonymous read of $GO_PROXY_REPO ONLY — never $REPO\",
+      \"privileges\": [
+        \"nx-repository-view-go-$GO_PROXY_REPO-read\",
+        \"nx-repository-view-go-$GO_PROXY_REPO-browse\"
+      ],
+      \"roles\": []
+    }" >/dev/null
+  log "created role $GO_PROXY_ANON_ROLE"
+fi
+curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/users/anonymous" \
+  -H 'Content-Type: application/json' -d "{
+    \"userId\": \"anonymous\",
+    \"firstName\": \"Anonymous\",
+    \"lastName\": \"User\",
+    \"emailAddress\": \"anonymous@example.org\",
+    \"source\": \"default\",
+    \"status\": \"active\",
+    \"roles\": [\"$GO_PROXY_ANON_ROLE\"]
+  }" >/dev/null
+curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/anonymous" \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "userId": "anonymous", "realmName": "NexusAuthorizingRealm"}' >/dev/null
+log "anonymous access re-enabled, scoped to $GO_PROXY_REPO only (role: $GO_PROXY_ANON_ROLE)"
+
 # --- 5. read-only role + developer user ----------------------------------
 if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/devtools-read" >/dev/null 2>&1; then
   log "role devtools-read already exists"
@@ -81,10 +164,12 @@ else
     -H 'Content-Type: application/json' -d "{
       \"id\": \"devtools-read\",
       \"name\": \"devtools-read\",
-      \"description\": \"read-only access to $REPO\",
+      \"description\": \"read-only access to $REPO and $GO_PROXY_REPO\",
       \"privileges\": [
         \"nx-repository-view-raw-$REPO-read\",
-        \"nx-repository-view-raw-$REPO-browse\"
+        \"nx-repository-view-raw-$REPO-browse\",
+        \"nx-repository-view-go-$GO_PROXY_REPO-read\",
+        \"nx-repository-view-go-$GO_PROXY_REPO-browse\"
       ],
       \"roles\": []
     }" >/dev/null
@@ -121,11 +206,28 @@ else
   log "uploaded smoke artifact"
 fi
 
-# unauthenticated must fail
+# unauthenticated must fail against the artifact repository ...
 if curl -sf -o /dev/null "$NEXUS_URL/repository/$REPO/$SMOKE_PATH"; then
   echo "ERROR: anonymous download unexpectedly succeeded"; exit 1
 fi
-log "anonymous download correctly rejected"
+log "anonymous download of $REPO correctly rejected"
+
+# ... but the PRIVILEGE CHECK for the go proxy must pass anonymously (see 4c
+# for why this is required). Nexus enforces the privilege before it ever
+# forwards a request upstream, so a probe path that does not exist proves the
+# access grant on its own, with no dependency on this script reaching the
+# public internet: a 401/403 here would mean the scoping is broken, while
+# any other status (404 from Nexus, or whatever the upstream returns) means
+# the request was let through.
+GO_PROXY_PROBE_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+  "$NEXUS_URL/repository/$GO_PROXY_REPO/example.invalid/does-not-exist/@v/list")
+case "$GO_PROXY_PROBE_CODE" in
+  401|403)
+    echo "ERROR: anonymous read of $GO_PROXY_REPO was rejected (HTTP $GO_PROXY_PROBE_CODE)"
+    exit 1
+    ;;
+esac
+log "anonymous read of $GO_PROXY_REPO correctly allowed (scoped exception; probe HTTP $GO_PROXY_PROBE_CODE)"
 
 # developer (read-only) must succeed and hash must match
 GOT_SHA=$(curl -sf -u "$DEV_USER:$DEV_PW" "$NEXUS_URL/repository/$REPO/$SMOKE_PATH" | sha256sum | awk '{print $1}')

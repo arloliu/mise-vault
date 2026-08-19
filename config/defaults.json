@@ -1,3 +1,4 @@
 {
-  "nexus_url": "http://127.0.0.2:8081/repository/devtools"
+  "nexus_url": "http://127.0.0.2:8081/repository/devtools",
+  "goproxy_url": "http://127.0.0.2:8081/repository/go-proxy"
 }

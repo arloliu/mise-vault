@@ -12,7 +12,7 @@ mise clones it, reads `metadata.lua`, and calls the three Lua hooks in `hooks/`.
 | Piece | Runs when |
 |---|---|
 | `hooks/backend_list_versions.lua` | `mise ls-remote <tool>` — returns versions from `catalog/<tool>/versions.json`, order verbatim |
-| `hooks/backend_install.lua` | `mise install <tool>@<version>` — builds the Nexus URL, downloads with `curl -n`, verifies SHA-256, extracts |
+| `hooks/backend_install.lua` | `mise install <tool>@<version>` — artifact tools: Nexus URL, `curl -n` download, SHA-256, extract; go tools: `go install` against the plugin-set GOPROXY (see the go-installed tools section) |
 | `hooks/backend_exec_env.lua` | tool activation — PATH entries and env vars (e.g. GOROOT) from `tool.json` |
 | `lib/common.lua` | shared helpers used by all three hooks |
 | `scripts/vault-sync` | generates the machine config (`~/.config/mise/conf.d/mise-vault.toml`) from the catalog |
@@ -337,6 +337,159 @@ active, alongside PATH. Values may use `{install_path}` and `{version}`:
 
 Use it for runtime distributions that need a home variable
 (`GOROOT`, `JAVA_HOME`, ...); ordinary CLI tools do not need it.
+
+### go-installed tools
+
+Some tools are not prebuilt artifacts at all: they are Go programs built on
+the fly with `go install <module>@v<version>`, resolved through a go module
+proxy the plugin controls rather than the artifact's own Nexus repository.
+A go tool's `tool.json` looks different from an artifact tool's — it has no
+`platforms` at all:
+
+```json
+{
+  "name": "gocensus",
+  "type": "go",
+  "module": "github.com/arloliu/gocensus/cmd/gocensus",
+  "module_root": "github.com/arloliu/gocensus"
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | must equal the catalog directory name, AND the last path element of `module` — `go install` names the resulting binary after that last element, so the two have to agree |
+| `type` | yes | the literal string `"go"` |
+| `module` | yes | the full package path passed to `go install`. Lowercase only (a module path with uppercase letters would need go-proxy escaping, which is not implemented, so the validator refuses it), host-looking first segment (contains a dot), at least one `/`, never `..`, and no path segment may start or end with a dot (go refuses those) — it is inserted into a shell command, so the shape is checked twice: once by the catalog validator, once again at install time |
+| `module_root` | no | the module's root path, needed for `go mod download` when a version carries an `h1` checksum (see below). Must be a prefix of `module`. When absent, `module` itself is treated as the root — correct whenever the installed package IS the module root, as it usually is for a single-binary tool with no `/cmd/...` subdirectory |
+| `env` | no | same as an artifact tool's `env` — extra variables at activation |
+
+`versions.json` for a go tool carries a bare version (`"0.2.0"`, no leading
+`v`) and an optional module checksum:
+
+```json
+[
+  { "version": "0.2.0", "h1": "h1:otaDYec9RJA0hc9GcuxWxFIdjcuzXy3lviT2BjamQ2E=" },
+  { "version": "0.4.0", "h1": "h1:bHafz9ZVgCl09jiiOv5Wt3+KrHawciXj00mqqtgJOCc=" }
+]
+```
+
+The plugin prepends `v` before calling `go` (`go install module@v0.2.0`) —
+the catalog always stores bare versions, matching every other tool type, so
+nothing about the approval workflow has to special-case go tools.
+For the same reason the validator refuses a go version that starts with a
+letter: a stored `"v0.4.0"` would render as `vv0.4.0` and could never
+install.
+Go versions are also lowercase-only — the catalog tooling builds proxy URLs
+from the version literally, and an uppercase version would need go-proxy
+escaping there.
+
+**`h1` is optional, by design, and that is a deliberate exception to this
+catalog's usual "checksum verification is never optional" rule.**
+When a version record carries an `h1` (the module's dirhash, in the same
+format `go.sum` uses), the plugin runs
+`go mod download -json <module_root>@v<version>` before building.
+It aborts if the returned `Sum` does not match.
+Before that, when `module` is longer than `module_root`, the plugin probes
+the proxy for any module nested between the two at the same version:
+`go install` resolves a package to the longest module path that exists at
+the requested version, so a nested module would be what actually gets
+built while the `h1` verified its parent — that situation aborts the
+install, and `scripts/add-version` and `scripts/verify-artifacts` refuse
+it at approval and CI time too.
+When `h1` is absent, the plugin trusts the go proxy for that version.
+This is safe because the go proxy is company infrastructure the plugin
+itself points at (see the GOPROXY resolution ladder below) — it is never
+the public internet.
+It is also safe because the approved-version list in `versions.json` is
+still the actual security boundary: a version has to be listed there
+before `mise` will ever install it, checksum or no checksum.
+`scripts/add-version` records an `h1` automatically; if it cannot obtain
+one it aborts rather than silently writing a proxy-trust entry — skipping
+the checksum is always the operator's explicit decision, made by passing
+`--no-h1`.
+`scripts/verify-artifacts --checksum` re-checks every recorded `h1` the
+same way.
+
+#### GOPROXY resolution ladder
+
+Exactly the same three-channel shape as the Nexus URL below, kept as a
+completely separate setting because a go tool must never build against
+whatever `GOPROXY` a developer happens to have exported for their own work:
+
+1. `MISE_VAULT_GOPROXY_URL` environment variable;
+2. per-tool `goproxy_url` option (`vault:gocensus[goproxy_url=...]`);
+3. `goproxy_url` in `config/defaults.json`.
+
+The plugin always overrides the subprocess's own `GOPROXY` with the resolved
+value — the developer's environment is never consulted.
+Every `go` fetch or build the plugin runs (`go mod download`, `go install`)
+also gets `GONOPROXY=none`, an empty `GOPRIVATE`, a pinned `GOFLAGS`,
+`GOSUMDB=off`, `GOTOOLCHAIN=local`, `GOENV=off`, a cleared `GOCACHEPROG`,
+and fresh per-install `GOMODCACHE`/`GOPATH`/`GOCACHE` directories under
+the download directory, shared by the checksum preflight and the build;
+the `go version` preflight gets `GOTOOLCHAIN=local` as well.
+Because the download directory can survive between installs (mise's
+`always_keep_download`), the hook removes any previous cache contents
+before starting, so the caches are fresh even on a force-reinstall.
+The fresh caches matter for integrity, not just hygiene: go trusts cached
+module content and cached build results without rehashing them, so an
+inherited module cache could serve tampered source that still reports the
+catalogued checksum, and an inherited build cache (or an external
+`GOCACHEPROG`) could supply a compiled result that was never built from
+the verified source.
+The cost is that a go tool re-downloads and recompiles everything on every
+install, which is the accepted price of the guarantee.
+`GONOPROXY=none` and the empty `GOPRIVATE` because a developer's
+`GOPRIVATE` setting (which doubles as the `GONOPROXY` default) would
+otherwise make matching modules bypass the proxy entirely and fetch from
+version control directly.
+`GOFLAGS` is pinned so locally configured flag defaults (file overlays,
+alternate tool execution) cannot change what gets built.
+
+One limitation is accepted and worth knowing:
+go's own module client follows cross-host HTTP redirects, and unlike curl
+(which the artifact path runs with `--max-redirs 0`) it offers no way to
+refuse them.
+A go proxy that answered with a redirect could therefore send module
+requests to another host.
+This is the same trust already placed in the proxy's content when a version
+carries no `h1`, and the private network's egress policy — not the plugin —
+is what makes "another host" unreachable in production, consistent with
+this project's standing rule that network isolation is the only hard
+guarantee of private-only operation.
+`GOSUMDB=off` because module authenticity is the `h1` check above and the
+approved-version list, not the public checksum database, which would mean
+an internet call.
+`GOTOOLCHAIN=local` because a go program's `go.mod` can request a newer Go
+than what's installed; without it the `go` command would try to download
+that toolchain itself, straight from the internet, which this plugin must
+never do after bootstrap.
+
+#### The go toolchain must already be installed
+
+Installing a go tool runs `go install` in a real subprocess, so an approved
+`go` has to already be installed.
+Bootstrapping `go` itself and a go tool in the very same first pass is not
+supported.
+The plugin locates the toolchain in two steps, and in both the reported
+version must be in the catalog's approved go version list — any binary
+that merely calls itself `go` is never enough:
+
+1. the `go` on `PATH`, if there is one and its version is approved;
+2. otherwise, mise's own install tree (`installs/go/<version>/bin/go`),
+   newest approved version first.
+
+The second step exists because mise strips its own managed tool paths from
+`PATH` while a plugin hook runs (verified against mise v2026.8.8), so a
+`mise use go` toolchain is invisible to step 1 — and it means a plain
+`mise install <go-tool>` works with no `PATH` preparation at all.
+If neither step finds an approved toolchain, the install fails immediately
+with an explicit message naming the fix (`mise use go@<version>`, then
+retry).
+This binds the version string, not the binary's provenance: a
+system-installed go at an approved version is accepted.
+In practice this only matters on a brand-new machine's very first run;
+every subsequent install finds `go` already there.
 
 ## Nexus URL override channels
 

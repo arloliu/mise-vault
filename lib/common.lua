@@ -58,8 +58,11 @@ end
 
 --- Load catalog/<tool>/versions.json; error if missing.
 --- Schema: ordered ARRAY, oldest-approved first (order is authoritative;
---- CI validates it — the plugin never re-sorts):
+--- CI validates it — the plugin never re-sorts).
+--- Artifact tools:
 ---   [ { "version": "2.12.1", "platforms": { "linux-amd64": { "sha256": "..." } } }, ... ]
+--- Go tools (h1 optional — see hooks/backend_install.lua):
+---   [ { "version": "0.2.0", "h1": "h1:..." }, ... ]
 function M.load_versions(tool)
     check_tool_name(tool)
     local path = file.join_path(M.plugin_dir(), "catalog", tool, "versions.json")
@@ -80,14 +83,32 @@ function M.find_version(versions, version)
     return nil
 end
 
---- A Nexus base URL must be a plain http(s) URL with no characters that
---- could alter a shell command or smuggle extra URL components.
-local function check_nexus_url(url, origin)
+--- A base URL (Nexus, or the go proxy) must be a plain http(s) URL with no
+--- characters that could alter a shell command or smuggle extra URL components.
+local function check_base_url(url, label, origin)
     if type(url) ~= "string"
         or url:match("^https?://[%w%-%._~:/%%%+]+$") == nil then
-        error("refusing unsafe nexus_url from " .. origin .. ": " .. tostring(url))
+        error("refusing unsafe " .. label .. " from " .. origin .. ": " .. tostring(url))
     end
     return url
+end
+
+--- Shared resolution ladder for a base URL: env var, then per-tool option,
+--- then config/defaults.json.
+--- Used by both Nexus and the go proxy so the two channels behave identically.
+local function resolve_base_url(env_var, option_key, defaults_key, label, options)
+    local env_url = os.getenv(env_var)
+    if env_url ~= nil and env_url ~= "" then
+        return check_base_url(env_url, label, env_var .. " environment variable")
+    end
+    if options ~= nil and options[option_key] ~= nil and options[option_key] ~= "" then
+        return check_base_url(options[option_key], label, "tool option")
+    end
+    local defaults = read_json(file.join_path(M.plugin_dir(), "config", "defaults.json"))
+    if defaults == nil or defaults[defaults_key] == nil then
+        error("mise-vault: no " .. defaults_key .. " configured (option or config/defaults.json)")
+    end
+    return check_base_url(defaults[defaults_key], label, "config/defaults.json")
 end
 
 --- Nexus base URL, first match wins:
@@ -96,18 +117,50 @@ end
 ---   2. per-tool option nexus_url (from [tool_alias] bracketed opts or [tools])
 ---   3. the default bundled in config/defaults.json
 function M.nexus_base(options)
-    local env_url = os.getenv("MISE_VAULT_NEXUS_URL")
-    if env_url ~= nil and env_url ~= "" then
-        return check_nexus_url(env_url, "MISE_VAULT_NEXUS_URL environment variable")
+    return resolve_base_url("MISE_VAULT_NEXUS_URL", "nexus_url", "nexus_url", "nexus_url", options)
+end
+
+--- Go proxy base URL for go-installed tools.
+--- Same three-channel ladder as nexus_base, kept separate because a go tool
+--- must never inherit the developer's own GOPROXY:
+---   1. MISE_VAULT_GOPROXY_URL environment variable
+---      (a shell export, or an [env] entry in a trusted mise.toml)
+---   2. per-tool option goproxy_url (from [tool_alias] bracketed opts or [tools])
+---   3. the default bundled in config/defaults.json
+function M.goproxy_base(options)
+    return resolve_base_url("MISE_VAULT_GOPROXY_URL", "goproxy_url", "goproxy_url", "goproxy_url", options)
+end
+
+--- Validate a go module path (or module root) before it reaches a shell
+--- command: lowercase [a-z0-9._~/-] only, no leading or trailing slash,
+--- no "..", at least one slash, a lowercase host-looking first segment
+--- (contains a dot), and no dots-only path segment ("." or ".." as a
+--- segment would change which path the module name resolves to).
+--- Uppercase module paths are refused: the go proxy protocol needs them
+--- escaped, which nothing here implements, so they fail closed instead.
+--- This is defense in depth: the catalog validator already enforces the
+--- same rule, but a runtime check never trusts a file on disk blindly.
+function M.check_module_path(module, label)
+    if type(module) ~= "string" or module == ""
+        or module:match("^[%l%d%._~/%-]+$") == nil
+        or module:find("..", 1, true) ~= nil
+        or module:sub(1, 1) == "/" or module:sub(-1) == "/"
+        or module:find("//", 1, true) ~= nil then
+        error(label .. " is not a valid go module path: " .. tostring(module))
     end
-    if options ~= nil and options.nexus_url ~= nil and options.nexus_url ~= "" then
-        return check_nexus_url(options.nexus_url, "tool option")
+    local first = module:match("^([^/]+)/")
+    if first == nil or first:match("^[%l%d][%l%d%.%-]*$") == nil or first:find("%.") == nil then
+        error(label .. " does not start with a lowercase host-looking segment: " .. tostring(module))
     end
-    local defaults = read_json(file.join_path(M.plugin_dir(), "config", "defaults.json"))
-    if defaults == nil or defaults.nexus_url == nil then
-        error("mise-vault: no nexus_url configured (option or config/defaults.json)")
+    -- go refuses path elements that begin or end with a dot;
+    -- rejecting them here keeps a bad catalog entry from failing
+    -- only deep inside the go command (this also covers "." and "..")
+    for segment in module:gmatch("/([^/]+)") do
+        if segment:match("^[%l%d_~%-]") == nil or segment:match("[%l%d_~%-]$") == nil then
+            error(label .. " has a path segment that starts or ends with a dot: " .. tostring(module))
+        end
     end
-    return check_nexus_url(defaults.nexus_url, "config/defaults.json")
+    return module
 end
 
 --- Substitute {version} / {install_path} placeholders.

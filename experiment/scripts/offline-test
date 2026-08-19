@@ -4,16 +4,41 @@
 # Runs offline-suite in a container attached solely to the compose 'isolated'
 # network (internal: true), using the mise-vault-test image. The repository is
 # mounted read-only so the suite and tests/lib come from the working tree.
+#
+# Nexus itself is also cut off from its upstream (the compose 'default'
+# network) for the duration: the go-proxy repository is a caching proxy, and
+# with egress available it would silently fetch any module the seed missed,
+# making an incomplete seed look complete. With egress severed, only the
+# already-cached content can be served — exactly the production situation.
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NETWORK = "mise-vault-experiment_isolated"
+EGRESS_NETWORK = "mise-vault-experiment_default"
+NEXUS_CONTAINER = "mv-nexus"
 IMAGE = "mise-vault-test"
 
-sys.exit(subprocess.call([
-    "docker", "run", "--rm", "--network", NETWORK,
-    "-v", f"{REPO_ROOT}:/repo:ro",
-    IMAGE, "python3", "/repo/experiment/scripts/offline-suite",
-]))
+
+def nexus_egress(connect):
+    verb = "connect" if connect else "disconnect"
+    r = subprocess.run(["docker", "network", verb, EGRESS_NETWORK, NEXUS_CONTAINER],
+                       capture_output=True, text=True)
+    # already connected / already disconnected is fine (a previous run may
+    # have been interrupted); anything else is a real error
+    if r.returncode != 0 and "is not connected" not in r.stderr \
+            and "already exists in network" not in r.stderr:
+        sys.exit(f"offline-test: could not {verb} nexus egress: {r.stderr.strip()}")
+
+
+nexus_egress(connect=False)
+try:
+    rc = subprocess.call([
+        "docker", "run", "--rm", "--network", NETWORK,
+        "-v", f"{REPO_ROOT}:/repo:ro",
+        IMAGE, "python3", "/repo/experiment/scripts/offline-suite",
+    ])
+finally:
+    nexus_egress(connect=True)
+sys.exit(rc)

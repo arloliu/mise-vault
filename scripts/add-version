@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
 """Append an approved version to a tool's catalog.
 
-For each platform declared in catalog/<tool>/tool.json:
+For an artifact tool (archive/binary/runtime), for each platform declared in
+catalog/<tool>/tool.json:
   1. render the artifact name and construct the Nexus URL,
   2. verify the artifact exists (HTTP HEAD via curl),
   3. obtain its SHA-256:
        - preferred: the <artifact>.sha256sum / <artifact>.sha256 sidecar
          (both "<sha>  <filename>" and bare-hash formats accepted),
        - fallback: download the artifact and hash it locally,
-  4. append {version, platforms{...sha256}} to versions.json (end of array —
-     approval order; never inserted, never updated in place).
+  4. append {version, platforms{...sha256}} to versions.json.
+
+For a go tool:
+  1. confirm the version exists at the go proxy
+     (GET <proxy>/<escaped module root>/@v/v<version>.info),
+  2. unless --no-h1 was given, obtain the module dirhash with
+     "go mod download -json" against that same proxy —
+     any failure to obtain it (go missing, download error) aborts,
+  3. append {version, [h1]} to versions.json — h1 is omitted (proxy trusted)
+     only when --no-h1 was passed explicitly.
+
+Either way the record is appended to the end of versions.json (approval
+order; never inserted, never updated in place).
 
 Auth: curl runs with -n (~/.netrc) plus anything in $NEXUS_CURL_OPTS
 (e.g. NEXUS_CURL_OPTS="-u user:pass"). Credentials never live in files here.
+The go proxy fetch is unauthenticated GET, same as any go-proxy client.
 
 Usage:
   scripts/add-version <tool> <version> [--nexus-url URL] [--platform P ...]
+                      [--catalog-dir DIR] [--dry-run]
+  scripts/add-version <go-tool> <version> [--goproxy-url URL] [--no-h1]
                       [--catalog-dir DIR] [--dry-run]
 """
 import argparse
@@ -29,6 +44,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SHA256_RE = re.compile(r"\b([0-9a-f]{64})\b")
+H1_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=\Z")
+MODULE_RE = re.compile(
+    r"^[a-z0-9]+(?:[a-z0-9-]*\.[a-z0-9-]+)+(?:/[a-z0-9_~-](?:[a-z0-9._~-]*[a-z0-9_~-])?)+\Z")
+# Base URLs get the same shape check the plugin applies at install time,
+# so approval can never accept a URL the runtime would refuse.
+URL_RE = re.compile(r"^https?://[A-Za-z0-9._~:/%+-]+\Z")
 
 
 def curl(args, **kw):
@@ -56,6 +77,85 @@ def default_nexus_url():
     if defaults.exists():
         return json.loads(defaults.read_text()).get("nexus_url")
     return None
+
+
+def default_goproxy_url():
+    defaults = REPO / "config" / "defaults.json"
+    if defaults.exists():
+        return json.loads(defaults.read_text()).get("goproxy_url")
+    return None
+
+
+def escape_module_path(path):
+    """Go's module-proxy escaping: each uppercase letter becomes '!' plus its
+    lowercase form (avoids case-folding collisions on case-insensitive
+    filesystems/caches). Our catalog already enforces lowercase module paths,
+    so this is normally a no-op — it exists so a fetch is always spec-correct
+    even if that constraint ever loosens."""
+    return "".join("!" + c.lower() if c.isupper() else c for c in path)
+
+
+def go_version_exists(proxy_url, module_root, version):
+    """GET the proxy's .info file for this version; None means it exists."""
+    url = f"{proxy_url}/{escape_module_path(module_root)}/@v/v{version}.info"
+    r = curl(["-w", "\n%{http_code}", url], follow=False)
+    if r.returncode != 0:
+        return f"unreachable ({curl_error(r)})", url
+    body, _, code = (r.stdout or "").rpartition("\n")
+    if code == "200":
+        return None, url
+    if code in ("404", "410"):
+        return f"not found at the go proxy (HTTP {code})", url
+    if code.startswith("3"):
+        return f"server redirected (HTTP {code}) — redirects are refused", url
+    return f"unexpected HTTP {code}", url
+
+
+def go_mod_h1(proxy_url, module_root, version):
+    """Run "go mod download -json" against the proxy and return its Sum.
+
+    Returns (h1, None) on success, (None, reason) otherwise.
+    "go" missing on PATH is reported as a specific reason, not a crash;
+    the caller treats every failure as fatal unless --no-h1 was given."""
+    import os
+    import shutil
+
+    if shutil.which("go") is None:
+        return None, "no go toolchain on PATH"
+    env = dict(os.environ)
+    # GONOPROXY/GOPRIVATE are pinned too: a developer GOPRIVATE setting
+    # (which doubles as the GONOPROXY default) would otherwise make a
+    # matching module bypass the proxy and fetch from version control.
+    # A fresh module cache per run: go trusts cached module content without
+    # refetching or rehashing it, so an inherited cache could report the
+    # expected checksum for tampered content. GOENV=off keeps "go env -w"
+    # settings out too.
+    with tempfile.TemporaryDirectory() as scratch:
+        env.update({"GOPROXY": proxy_url, "GONOPROXY": "none", "GOPRIVATE": "",
+                    "GOSUMDB": "off", "GOTOOLCHAIN": "local", "GOENV": "off",
+                    "GOMODCACHE": f"{scratch}/gomodcache", "GOPATH": f"{scratch}/gopath",
+                    "GOCACHE": f"{scratch}/gocache", "GOCACHEPROG": "",
+                    "GOFLAGS": "-mod=mod -modcacherw"})
+        try:
+            p = subprocess.run(
+                ["go", "mod", "download", "-json", f"{module_root}@v{version}"],
+                capture_output=True, text=True, env=env, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return None, f"go mod download could not run: {e}"
+    # "go mod download -json" can exit nonzero and still print a JSON body
+    # with an Error field, so the JSON is always parsed first; only when that
+    # fails does the exit code become the story.
+    try:
+        decoded = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        detail = (p.stderr or p.stdout or "").strip().splitlines()
+        return None, detail[0] if detail else f"go mod download exited {p.returncode}"
+    if decoded.get("Error"):
+        return None, decoded["Error"]
+    sum_ = decoded.get("Sum")
+    if not sum_ or not H1_RE.match(sum_):
+        return None, f"go mod download returned no usable Sum: {decoded!r}"
+    return sum_, None
 
 
 def check_artifact(url):
@@ -121,19 +221,83 @@ def sha_by_download(url):
         return h.hexdigest(), None
 
 
+def add_go_version(args, tool, versions_file, versions):
+    module = tool.get("module", "")
+    if not MODULE_RE.match(module) or ".." in module:
+        sys.exit(f"error: {tool.get('name')} has an invalid module in tool.json: {module!r}")
+    module_root = tool.get("module_root", module)
+    if tool.get("module_root"):
+        if not MODULE_RE.match(module_root) or ".." in module_root:
+            sys.exit(f"error: {tool.get('name')} has an invalid module_root in tool.json: {module_root!r}")
+        if not (module_root == module or module.startswith(module_root + "/")):
+            sys.exit(f"error: module_root {module_root!r} is not a prefix of module {module!r}")
+
+    proxy = args.goproxy_url
+    if not proxy:
+        sys.exit("error: no go proxy URL (pass --goproxy-url or set config/defaults.json goproxy_url)")
+    if not URL_RE.match(proxy):
+        sys.exit(f"error: refusing unsafe go proxy URL: {proxy!r}")
+
+    print(f"go module: {module}  (root {module_root})")
+    reason, url = go_version_exists(proxy, module_root, args.version)
+    if reason is not None:
+        sys.exit(f"error: version {reason}: {url}")
+    print(f"  exists at go proxy: {url}")
+
+    # "go install" resolves a package to the LONGEST module path existing at
+    # the requested version; a module nested below module_root would shadow
+    # it and unbind the recorded h1 from what actually gets built.
+    if module_root != module:
+        candidate = module_root
+        for segment in module[len(module_root) + 1:].split("/"):
+            candidate += "/" + segment
+            nested_reason, nested_url = go_version_exists(proxy, candidate, args.version)
+            if nested_reason is None:
+                sys.exit(f"error: module {candidate} also exists at v{args.version} and "
+                         f"would shadow module_root {module_root} during go install; "
+                         f"fix module_root in tool.json")
+            if "not found" not in nested_reason:
+                sys.exit(f"error: could not probe for nested modules ({nested_reason}): {nested_url}")
+
+    record = {"version": args.version}
+    if args.no_h1:
+        print("  --no-h1: recording a proxy-trust entry (no dirhash check at install time)")
+    else:
+        h1, reason = go_mod_h1(proxy, module_root, args.version)
+        if h1 is None:
+            # A proxy-trust entry is an explicit operator decision, never a
+            # silent downgrade: if the dirhash cannot be obtained, stop.
+            sys.exit(f"error: could not obtain the module dirhash ({reason}); "
+                     f"fix that, or pass --no-h1 to deliberately record a "
+                     f"proxy-trust entry with no dirhash check at install time")
+        record["h1"] = h1
+        print(f"  h1 from go mod download: {h1}")
+
+    versions.append(record)
+    rendered = json.dumps(versions, indent=2) + "\n"
+    if args.dry_run:
+        print(f"\n--dry-run: would append to {versions_file}:")
+        print(json.dumps(record, indent=2))
+        return
+    versions_file.write_text(rendered)
+    print(f"\nappended {args.tool} {args.version} to {versions_file}")
+    print(f"next: run scripts/validate-catalog and "
+          f"scripts/verify-artifacts --checksum --tool {args.tool}, then open the catalog MR")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("tool")
     ap.add_argument("version")
     ap.add_argument("--nexus-url", default=default_nexus_url())
+    ap.add_argument("--goproxy-url", default=default_goproxy_url())
+    ap.add_argument("--no-h1", action="store_true",
+                    help="go tools only: record a proxy-trust entry, skip go mod download")
     ap.add_argument("--platform", action="append",
                     help="restrict to these platforms (default: all in tool.json)")
     ap.add_argument("--catalog-dir", default=str(REPO / "catalog"))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
-
-    if not args.nexus_url:
-        sys.exit("error: no Nexus URL (pass --nexus-url or set config/defaults.json)")
 
     tool_dir = Path(args.catalog_dir) / args.tool
     tool_file = tool_dir / "tool.json"
@@ -147,6 +311,16 @@ def main():
         sys.exit(f"error: {versions_file} is not an array — migrate to the ordered-array schema first")
     if any(rec.get("version") == args.version for rec in versions):
         sys.exit(f"error: {args.tool} {args.version} already in catalog (records are immutable)")
+
+    if tool.get("type") == "go":
+        if args.platform:
+            sys.exit("error: --platform does not apply to a go tool")
+        return add_go_version(args, tool, versions_file, versions)
+
+    if not args.nexus_url:
+        sys.exit("error: no Nexus URL (pass --nexus-url or set config/defaults.json)")
+    if not URL_RE.match(args.nexus_url):
+        sys.exit(f"error: refusing unsafe Nexus URL: {args.nexus_url!r}")
 
     platforms = args.platform or sorted(tool["platforms"])
     unknown = set(platforms) - set(tool["platforms"])

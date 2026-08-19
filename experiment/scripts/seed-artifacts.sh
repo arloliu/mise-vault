@@ -107,5 +107,46 @@ while read -r v name url; do
   upload glab "$v" "$f"
 done < "$WORK/glab.list"
 
+# --- go-proxy cache warming (go-installed tools; catalog/gocensus) ---------
+# Unlike the tools above, a go tool has no Nexus artifact to upload: its
+# content is the go proxy repository's cache of the real module, fetched
+# straight from proxy.golang.org through Nexus. Warming it here means a
+# later offline run finds every approved version already cached, the same
+# reason the archive tools above are pre-uploaded.
+log "warming the go-proxy cache for catalog/gocensus"
+GOCENSUS_ROOT="github.com/arloliu/gocensus"
+python3 - "$(cd "$(dirname "$0")/../.." && pwd)/catalog/gocensus/versions.json" <<'PY' > "$WORK/gocensus.versions"
+import json, sys
+for rec in json.load(open(sys.argv[1])):
+    print(rec["version"])
+PY
+# Warming must cover the whole dependency closure, not just the module
+# itself:
+# installing gocensus later also downloads every module it depends on,
+# and any of those missing from the cache would force Nexus to reach
+# upstream at install time.
+# A real "go install" through the proxy, with a fresh module cache and
+# GOPATH, is the only reliable way to pull the full closure through.
+GOCENSUS_MODULE="$GOCENSUS_ROOT/cmd/gocensus"
+command -v go >/dev/null 2>&1 || {
+  echo "ERROR: warming the go-proxy cache needs a go toolchain on PATH" >&2
+  exit 1
+}
+GOWARM=$(mktemp -d)
+while read -r v; do
+  # -modcacherw keeps the throwaway module cache deletable afterwards
+  if GOPROXY="$NEXUS_URL/repository/go-proxy" GONOPROXY=none GOPRIVATE= \
+     GOSUMDB=off GOTOOLCHAIN=local GOENV=off GOCACHEPROG= GOFLAGS=-modcacherw \
+     GOPATH="$GOWARM/gopath" GOMODCACHE="$GOWARM/modcache" \
+     GOCACHE="$GOWARM/gocache" GOBIN="$GOWARM/bin" \
+     go install "$GOCENSUS_MODULE@v$v" >/dev/null 2>&1; then
+    log "gocensus $v and its full dependency closure cached at go-proxy"
+  else
+    echo "ERROR: could not warm go-proxy cache for gocensus $v" >&2
+    exit 1
+  fi
+done < "$WORK/gocensus.versions"
+rm -rf "$GOWARM"
+
 log "seed complete; manifest:"
 column -t "$MANIFEST"

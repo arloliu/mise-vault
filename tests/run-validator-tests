@@ -24,12 +24,20 @@ ROOT = Path(__file__).resolve().parent.parent
 VALIDATE = str(ROOT / "scripts" / "validate-catalog")
 FIXTURES = ROOT / "tests" / "fixtures" / "invalid-catalog"
 # cases a formal JSON Schema can express on its own (single-file shape rules);
-# the rest are cross-file rules that only the built-in/cross checks cover
+# the rest are cross-file rules that only the built-in/cross checks cover.
+# go-version-has-platforms, artifact-version-has-h1, go-module-name-mismatch,
+# and go-module-root-not-prefix are all deliberately absent here: telling a
+# go-shaped version record from an artifact-shaped one (or a tool's module
+# from its own name) needs the other file, which a single JSON Schema can
+# never see — those four are built-in/cross-check-only by design.
 SCHEMA_CASES = ["artifact-traversal", "artifact-shell-metacharacters",
                 "artifact-missing-version", "bin-path-absolute",
                 "bin-path-traversal", "bad-sha256", "unknown-field",
-                "invalid-format"]
-MIN_CASES = 12
+                "invalid-format", "go-module-shell-metacharacters",
+                "go-module-dot-segment", "go-module-uppercase",
+                "go-module-dot-edge", "go-version-v-prefix",
+                "go-version-uppercase", "go-module-trailing-newline"]
+MIN_CASES = 23
 
 s = Suite("run-validator-tests")
 
@@ -48,11 +56,18 @@ for case in cases:
     s.check(f"built-in engine rejects: {case.name}", not r.ok,
             detail="output: " + r.tail())
 
+# positive coverage for the go shape, isolated from every other tool type
+GO_SAMPLE = ROOT / "tests" / "fixtures" / "catalog" / "go-sample"
+r = run([VALIDATE, "--engine", "builtin", "--catalog-dir", str(GO_SAMPLE.parent)])
+s.check("built-in engine accepts a valid go tool", r.ok, detail="output: " + r.tail())
+
 if importlib.util.find_spec("jsonschema"):
     for name in SCHEMA_CASES:
         r = run([VALIDATE, "--engine", "schema", "--catalog-dir", str(FIXTURES / name)])
         s.check(f"schemas alone reject: {name}", not r.ok,
                 detail="schemas/ has drifted behind the built-in rules; output: " + r.tail())
+    r = run([VALIDATE, "--engine", "schema", "--catalog-dir", str(GO_SAMPLE.parent)])
+    s.check("schemas alone accept a valid go tool", r.ok, detail="output: " + r.tail())
 else:
     s.note("jsonschema not installed — schema-only passes skipped (CI runs them)", tag="NOTE")
 

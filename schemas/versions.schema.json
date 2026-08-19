@@ -5,26 +5,50 @@
   "description": "Ordered array, oldest-approved first. Order is authoritative; the plugin returns it verbatim.",
   "type": "array",
   "items": {
-    "type": "object",
-    "additionalProperties": false,
-    "required": ["version", "platforms"],
-    "properties": {
-      "version": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]*$" },
-      "platforms": {
+    "oneOf": [
+      {
+        "title": "artifact version record",
         "type": "object",
-        "minProperties": 1,
         "additionalProperties": false,
-        "patternProperties": {
-          "^(linux|darwin|windows)-(amd64|arm64)$": {
+        "required": ["version", "platforms"],
+        "properties": {
+          "version": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]*(?![\\s\\S])" },
+          "platforms": {
             "type": "object",
+            "minProperties": 1,
             "additionalProperties": false,
-            "required": ["sha256"],
-            "properties": {
-              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            "patternProperties": {
+              "^(linux|darwin|windows)-(amd64|arm64)(?![\\s\\S])": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["sha256"],
+                "properties": {
+                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])" }
+                }
+              }
             }
           }
         }
+      },
+      {
+        "title": "go tool version record",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version"],
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[0-9][a-z0-9.+_-]*(?![\\s\\S])",
+            "description": "Bare version with no leading 'v' (the plugin prepends the 'v' when calling go); must start with a digit and be lowercase (an uppercase version would need go-proxy escaping in the catalog tooling, which is not implemented)"
+          },
+          "h1": {
+            "type": "string",
+            "pattern": "^h1:[A-Za-z0-9+/]{43}=(?![\\s\\S])",
+            "description": "Optional module dirhash from the go proxy. When present the plugin verifies it via 'go mod download' before building and aborts on mismatch. When absent, the go proxy is trusted (the approved-version list is still the gate)."
+          }
+        }
       }
-    }
+    ]
   }
 }

@@ -1,0 +1,5 @@
+{
+  "name": "evil",
+  "type": "go",
+  "module": "github.com/acme/evil/cmd/evil"
+}

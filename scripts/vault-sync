@@ -3,8 +3,9 @@
 #
 # Generates ~/.config/mise/conf.d/mise-vault.toml containing:
 #   - [tool_alias] <tool> = "vault:<tool>"  for every catalog tool (pure routing;
-#     the Nexus URL lives in the plugin checkout's config/defaults.json, so it
-#     always matches the installed plugin version)
+#     the Nexus URL, and — for go-installed tools — the go proxy URL, both live
+#     in the plugin checkout's config/defaults.json, so an alias always matches
+#     the installed plugin version regardless of how a tool is built)
 #   - [tasks.vault-sync] so `mise run vault-sync` re-runs this script
 #
 # With an argument, first updates the plugin, then regenerates from the NEW checkout:

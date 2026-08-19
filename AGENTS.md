@@ -50,7 +50,12 @@ tmp/                    scratch area, not part of the deliverable
 - **Fail closed.**
   Unknown tool, unapproved version, unsupported platform, missing artifact, checksum mismatch:
   each aborts with a specific error message.
-  Never add a fallback to a public service, and never make checksum verification optional.
+  Never add a fallback to a public service,
+  and never make artifact SHA-256 verification optional.
+  The one deliberate exception: a go-tool version record may omit its `h1`
+  module checksum (an explicit proxy-trust entry, requiring `--no-h1` at
+  approval time) — but a recorded `h1` is always enforced,
+  and the approved-version list still gates every install.
 - **Data over code.**
   Adding a normal tool means adding `catalog/<tool>/tool.json` and `versions.json`,
   not writing tool-specific Lua.
@@ -153,6 +158,18 @@ The operative rules:
   listing `vfox` there does not affect this plugin, which is addressed by its own name.
   Tests must assert the resolving backend (`mise tool <name>` shows `vault:<name>`),
   and network isolation remains the only hard guarantee of private-only operation.
+- **mise strips its own managed tool paths from PATH while plugin hooks run**
+  (verified against mise v2026.8.8: inside `BackendInstall`, `go` resolved to the
+  system toolchain even under `mise exec go@… -- mise install …`).
+  A hook that needs another mise-installed tool must locate it in
+  `~/.local/share/mise/installs/<tool>/<version>/` itself; putting it on PATH first
+  does not survive into the hook.
+  Non-mise directories prepended to PATH do survive.
+- **go's module client follows cross-host redirects and cannot be told not to.**
+  The artifact path refuses redirects (`curl --max-redirs 0`), but `go mod download`
+  and `go install` follow whatever the go proxy answers.
+  A compromised or misconfigured proxy could redirect module fetches to another host;
+  network egress policy, not the plugin, is what makes that unreachable in production.
 - **`MISE_OFFLINE=1` does not block this plugin's downloads**
   (they run through `cmd`-spawned curl, outside mise's own HTTP layer).
   Never-contact-the-internet is enforced by the plugin constructing only Nexus URLs.

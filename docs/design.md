@@ -40,6 +40,21 @@ this document states the resulting rules in plain language.
    but installation verifies exclusively against the catalog value —
    a checksum stored next to its artifact proves nothing if the store is compromised.
 8. **The original open questions (section 33) are all answered** — see research/SYNTHESIS.md.
+9. **A second tool type exists: go-installed tools.**
+   Not every tool is a prebuilt artifact — some are built on the fly with
+   `go install <module>@v<version>` against a go module proxy the plugin
+   controls (see the "Go-Installed Tool" worked example later in this
+   document).
+   Routing stays exactly the same as every other tool (`vault:<tool>`,
+   name↔module mapping in `tool.json`); only the install mechanism differs.
+   The go proxy gets its own env-var/option/default resolution ladder,
+   deliberately separate from the Nexus one, so a go tool never inherits a
+   developer's own `GOPROXY`.
+   Module checksum verification (`h1`, matching `go.sum`'s format) is
+   optional per version — the one deliberate exception to this catalog's
+   "checksum verification is never optional" rule, justified because the
+   go proxy is company infrastructure the plugin itself addresses, and the
+   approved-version list is still the actual gate on what installs.
 
 ## 1. Overview
 
@@ -922,16 +937,67 @@ PATH=<install_path>/bin
 GOROOT=<install_path>
 ```
 
-Do not hard-code Go-specific behavior across the backend.
+---
 
-Instead, model runtime distributions generically, with tool-specific environment definitions where required.
+## 14.4 Go-Installed Tool
 
-Future examples may include:
+gocensus is the example.
+There is no artifact to download at all: `tool.json` carries a `module`
+(the package path passed to `go install`) instead of `platforms`, and
+`versions.json` carries a bare version plus an optional `h1` checksum
+instead of per-platform SHA-256 values.
 
-- Python distributions
-- Node.js distributions
-- Rust toolchains
-- Java distributions
+```json
+{
+  "name": "gocensus",
+  "type": "go",
+  "module": "github.com/arloliu/gocensus/cmd/gocensus",
+  "module_root": "github.com/arloliu/gocensus"
+}
+```
+
+`module_root` names the module that `go mod download` verifies when a
+version carries an `h1`; here the installed package lives under `/cmd/`,
+so the package path alone would not resolve as a module.
+
+Installation:
+
+```text
+version approved?
+-> approved go toolchain located (PATH go if its version is approved,
+   else mise's own install tree, newest approved version first —
+   any binary merely named "go" is refused)
+-> (if h1 present) no nested module shadows module_root at this version,
+   then go mod download -json against the plugin's GOPROXY,
+   compare Sum, abort on mismatch
+-> go install <module>@v<version> with GOBIN=<install_path>/bin
+```
+
+Every go subprocess runs in a pinned environment: the plugin's GOPROXY,
+`GONOPROXY=none`, empty `GOPRIVATE`, pinned `GOFLAGS`, `GOSUMDB=off`,
+`GOTOOLCHAIN=local`, `GOENV=off`, `GOCACHEPROG` cleared, and fresh
+per-install `GOMODCACHE`/`GOPATH`/`GOCACHE` directories shared by the
+checksum preflight and the build (details and rationale in
+docs/development.md).
+
+The environment then exposes just:
+
+```text
+PATH=<install_path>/bin
+```
+
+No GOROOT, no platform lookup — a go-installed tool runs wherever an
+approved go toolchain already runs.
+
+Prebuilt runtime distributions — the go distribution itself is the worked
+example — are modeled generically: platform artifacts in the catalog plus
+tool-specific environment definitions (like GOROOT) where required, never
+runtime-specific code.
+The go-installed tool type is the deliberate, contained exception: it is
+one explicit branch in the install and exec-env hooks, driven entirely by
+catalog data, and future build-from-source ecosystems (Python, Node.js,
+Rust, Java tooling) would follow the same pattern — a catalog-driven
+branch per ecosystem, never per-tool code.
 
 ---
 

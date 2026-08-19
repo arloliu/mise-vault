@@ -12,6 +12,7 @@
 #
 # Requires: experiment stack up + provisioned + seeded; the lifecycle tags present.
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -35,23 +36,28 @@ GCL_ALL = " ".join(catalog.versions("golangci-lint", REPO_ROOT))
 GCL_V = catalog.latest("golangci-lint", REPO_ROOT)
 GLAB_V = catalog.latest("glab", REPO_ROOT)
 GO_V = catalog.latest("go", REPO_ROOT)
+GOCENSUS_V = catalog.latest("gocensus", REPO_ROOT)
+GOCENSUS_ALL = catalog.versions("gocensus", REPO_ROOT)
 
 s = Suite("poc-test")
 home = IsolatedHome("mise-vault-poc.")
 
 # the generated conf.d file (aliases + nexus_url option per tool)
 # one alias keeps an explicit URL option to cover the override channel
+GOPROXY_HOST_URL = f"{NEXUS_HOST_URL}/repository/go-proxy"
 ALIASES = {
     "go": "vault:go",
     "glab": "vault:glab",
     "smoke": "vault:smoke",
+    "gocensus": "vault:gocensus",
+    "gocensus-bad-h1": "vault:gocensus-bad-h1",
     "golangci-lint": f"vault:golangci-lint[nexus_url={NEXUS_HOST_URL}/repository/devtools]",
 }
 home.write_aliases(ALIASES)
 
 
 def link_working_tree():
-    """Copy the working tree's plugin files (plus the two fixture tools)
+    """Copy the working tree's plugin files (plus the fixture tools)
     into an isolated plugin dir and link it, so every later check runs
     the exact code under review."""
     plug = home.path / "plugin"
@@ -59,8 +65,9 @@ def link_working_tree():
     shutil.copy(REPO_ROOT / "metadata.lua", plug / "metadata.lua")
     for d in ("hooks", "lib", "config", "catalog"):
         shutil.copytree(REPO_ROOT / d, plug / d)
-    # fixtures: darwin-only (unsupported platform) and smoke (deliberately wrong sha256)
-    for tool in ("darwin-only", "smoke"):
+    # fixtures: darwin-only (unsupported platform), smoke (deliberately wrong
+    # sha256), gocensus-bad-h1 (real go module, deliberately wrong h1)
+    for tool in ("darwin-only", "smoke", "gocensus-bad-h1"):
         shutil.copytree(REPO_ROOT / "tests/fixtures/catalog" / tool, plug / "catalog" / tool)
     run(["mise", "plugins", "uninstall", "vault"], env=home.env)
     return plug, run(["mise", "plugins", "link", "vault", str(plug)], env=home.env)
@@ -99,6 +106,10 @@ lsgo_lines = r.out.splitlines()
 s.check("ls-remote go shows only catalog versions (core backend shadowed)",
         GO_V in lsgo_lines and not any(l.startswith("1.24") for l in lsgo_lines),
         detail=f"got: {r.out[:120]}")
+r = run(["mise", "ls-remote", "vault:gocensus"], env=home.env)
+lsgc = " ".join(r.out.split())
+s.check(f"ls-remote vault:gocensus == exactly catalog ({' '.join(GOCENSUS_ALL)})",
+        lsgc == " ".join(GOCENSUS_ALL), detail=f"got: {lsgc}")
 
 s.phase("Phase 4: installs (download via curl -n + sha256 + extract)")
 s.check_cmd(f"install golangci-lint@{GCL_V} (nested archive, strip=1)",
@@ -119,6 +130,106 @@ goroot_out = goroot_r.out.strip()
 s.check(f"GOROOT exported and valid ({goroot_out})",
         bool(goroot_out) and Path(goroot_out, "src").is_dir(),
         detail=f"got: '{goroot_out}'")
+
+s.phase(f"Phase 4b: go-installed tool (gocensus, via go install against {GOPROXY_HOST_URL})")
+# a go tool needs an approved go toolchain already installed (bootstrapping
+# go and a go tool together in one pass is not supported), but NOT on PATH:
+# mise strips its own managed tool paths from PATH while hooks run, so the
+# plugin locates the approved toolchain in mise's install tree itself —
+# a plain "mise install" therefore has to work
+gocensus_install = ["mise", "install", f"gocensus@{GOCENSUS_V}"]
+s.check_cmd(f"install gocensus@{GOCENSUS_V} (go install, plugin-set GOPROXY, h1 verified)",
+            gocensus_install, env=home.env)
+r = run(["mise", "exec", f"gocensus@{GOCENSUS_V}", "--", "gocensus", "--help"], env=home.env)
+s.check("gocensus runs (--help)", "gocensus <command>" in r.out or "Usage" in r.out,
+        detail=r.tail())
+r = run(["mise", "tool", "gocensus", "--backend"], env=home.env)
+s.check("mise tool gocensus resolves to the vault backend", r.out.strip() == "vault:gocensus",
+        detail=f"got: {r.out.strip()!r}; {r.tail()}")
+r = run(["mise", "install", f"gocensus@9.9.9"], env=home.env)
+s.check("unapproved gocensus version rejected",
+        (not r.ok) and "not an approved version" in (r.out + r.err), detail=r.tail())
+r = run(["mise", "install", "gocensus-bad-h1@0.2.0"], env=home.env)
+combined = (r.out + r.err).lower()
+s.check("go module checksum mismatch aborts install with explicit error",
+        (not r.ok) and "checksum mismatch" in combined, detail=f"out: {(r.out + r.err)[:200]}")
+# a binary that merely calls itself "go" must never be the one that builds:
+# this shim reports an unapproved version and hard-fails any build attempt,
+# so the install can only succeed by bypassing it for the approved toolchain
+shim_dir = home.path / "fake-go-bin"
+shim_dir.mkdir(parents=True, exist_ok=True)
+shim = shim_dir / "go"
+shim.write_text("#!/bin/sh\n"
+                "if [ \"$1\" = version ]; then echo 'go version go9.9.9 linux/amd64'; exit 0; fi\n"
+                "echo 'fake go shim was used for a build' >&2\n"
+                "exit 1\n")
+shim.chmod(0o755)
+env_shim = {**home.env, "PATH": f"{shim_dir}:{home.env['PATH']}"}
+r = run(["mise", "install", "-f", f"gocensus@{GOCENSUS_V}"], env=env_shim)
+s.check("unapproved go on PATH is bypassed for the approved toolchain (fake go9.9.9 shim)",
+        r.ok, detail=r.tail())
+# forged success markers in go's output must never flip a failure into a
+# success: these shims claim an APPROVED version (so the toolchain gate
+# accepts them), print a forged success trailer, then exit nonzero — the
+# hook's real trailer is printed after theirs, so the forgery must lose
+real_go = home.path / f".local/share/mise/installs/go/{GO_V}/bin/go"
+forge_dir = home.path / "forge-go-bin"
+forge_dir.mkdir(parents=True, exist_ok=True)
+forge = forge_dir / "go"
+forge.write_text("#!/bin/sh\n"
+                 f"if [ \"$1\" = version ]; then echo 'go version go{GO_V} linux/amd64'; exit 0; fi\n"
+                 f"if [ \"$1\" = mod ]; then exec '{real_go}' \"$@\"; fi\n"
+                 "echo 'GOINSTALL_EXIT=0'\n"
+                 "exit 7\n")
+forge.chmod(0o755)
+env_forge = {**home.env, "PATH": f"{forge_dir}:{home.env['PATH']}"}
+r = run(["mise", "install", "-f", f"gocensus@{GOCENSUS_V}"], env=env_forge)
+s.check("forged GOINSTALL_EXIT=0 in build output cannot fake a successful install",
+        (not r.ok) and "go install failed" in (r.out + r.err), detail=r.tail())
+# the shim prints VALID JSON with the real catalogued Sum before the forged
+# marker, so the only possible failure cause is trailer selection: a parser
+# regressed to trusting the first forged marker would sail straight through
+# to "go install failed" instead of "could not verify"
+goc_h1 = next(rec["h1"] for rec in
+              json.loads((REPO_ROOT / "catalog/gocensus/versions.json").read_text())
+              if rec["version"] == GOCENSUS_V)
+forge.write_text("#!/bin/sh\n"
+                 f"if [ \"$1\" = version ]; then echo 'go version go{GO_V} linux/amd64'; exit 0; fi\n"
+                 f"printf '{{\"Sum\":\"%s\"}}\\n' '{goc_h1}'\n"
+                 "echo 'GOMOD_EXIT=0'\n"
+                 "exit 9\n")
+forge.chmod(0o755)
+r = run(["mise", "install", "-f", f"gocensus@{GOCENSUS_V}"], env=env_forge)
+s.check("forged GOMOD_EXIT=0 with a correct Sum cannot fake checksum verification",
+        (not r.ok) and "could not verify" in (r.out + r.err), detail=r.tail())
+
+# a retained download directory (mise's always_keep_download) must not let
+# a tampered module cache survive into the next install: the hook removes
+# any previous cache contents, so poisoning the retained cache with a
+# compile error and force-reinstalling has to succeed from fresh downloads
+env_keep = {**home.env, "MISE_ALWAYS_KEEP_DOWNLOAD": "1"}
+r = run(["mise", "install", "-f", f"gocensus@{GOCENSUS_V}"], env=env_keep)
+poisoned = 0
+dl_cache = home.path / ".local/share/mise/downloads"
+for src in dl_cache.glob(f"**/gomodcache/github.com/arloliu/gocensus@v{GOCENSUS_V}/**/*.go"):
+    src.chmod(0o644)
+    src.write_text("this is not go source\n")
+    poisoned += 1
+r2 = run(["mise", "install", "-f", f"gocensus@{GOCENSUS_V}"], env=env_keep)
+s.check("poisoned retained module cache is discarded, reinstall succeeds",
+        r.ok and poisoned > 0 and r2.ok,
+        detail=f"first={r.ok} poisoned_files={poisoned} second={r2.tail()}")
+
+# and with NO approved toolchain anywhere, the install must fail by name
+go_installs = home.path / ".local/share/mise/installs/go"
+go_hidden = home.path / ".local/share/mise/installs/go.hidden"
+shutil.move(str(go_installs), str(go_hidden))
+try:
+    r = run(["mise", "install", "-f", f"gocensus@{GOCENSUS_V}"], env=env_shim)
+    s.check("no approved go toolchain anywhere aborts with explicit error",
+            (not r.ok) and "no approved go toolchain" in (r.out + r.err), detail=r.tail())
+finally:
+    shutil.move(str(go_hidden), str(go_installs))
 
 s.phase("Phase 5: MISE_VAULT_NEXUS_URL overrides every other URL channel")
 # env var pointing at a dead port must beat the alias option (which points at

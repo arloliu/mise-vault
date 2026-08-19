@@ -82,10 +82,14 @@ else:
 
 # The committed Nexus URL points at the host-side experiment address, which is
 # not routable in this container. Use the sanctioned per-tool override channel.
-write_aliases(HOME, {
+aliases = {
     t: f"vault:{t}[nexus_url={NEXUS_CONTAINER_URL}/repository/devtools]"
     for t in ("go", "golangci-lint", "glab")
-})
+}
+# a go-installed tool downloads modules, not artifacts, so its override is
+# the go-proxy repository instead of the artifact repository
+aliases["gocensus"] = f"vault:gocensus[goproxy_url={NEXUS_CONTAINER_URL}/repository/go-proxy]"
+write_aliases(HOME, aliases)
 
 s.phase("2. discovery and install with zero public internet")
 
@@ -123,6 +127,23 @@ if go_ok:
     s.ok("go runtime installed and runs")
 else:
     s.bad("go install")
+
+# gocensus is built from source with "go install" served entirely by the
+# go-proxy cache, which proves the seeded cache holds the FULL dependency
+# closure — any module missing from it fails this install right here.
+# No PATH setup: this container has no system go, so the plugin must find
+# the just-installed approved toolchain in mise's install tree by itself.
+GOC_V = safe_latest("gocensus", "/tmp/bootstrap")
+install_r = run(["mise", "install", f"gocensus@{GOC_V}"], env=ENV)
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"gocensus@{GOC_V}", "--", "gocensus", "--help"], env=ENV)
+    goc_ok = bool(GOC_V) and exec_r.ok
+else:
+    goc_ok = False
+if goc_ok:
+    s.ok("gocensus built via go install (full module closure from private go-proxy)")
+else:
+    s.bad(f"gocensus install ({install_r.tail()})")
 
 s.phase("3. catalog-only policy holds offline")
 

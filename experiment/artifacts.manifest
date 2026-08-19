@@ -13,3 +13,6 @@ golangci-lint 2.12.2 linux-arm64 44cd40a8c76c86755375adfeea52cfd3533cb43d7bd6477
 golangci-lint 2.12.2 darwin-arm64 a9c54498731b3128f79e090be6110f3e5fffccc617b08142ed244d4126c73f29 golangci-lint-2.12.2-darwin-arm64.tar.gz
 glab 1.113.0 linux-arm64 0c4cab3b35f7641e7955492b9491d7070698a958f0dfcb49d989e71bd78793c2 glab_1.113.0_linux_arm64.tar.gz
 glab 1.113.0 darwin-arm64 d8bc152c982c0fd6f687ecd864572d974de3f3ce756957d74e8e34c75ec96db6 glab_1.113.0_darwin_arm64.tar.gz
+go 1.26.7 linux-amd64 ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca go1.26.7.linux-amd64.tar.gz
+go 1.25.14 linux-amd64 a21ae5633a269bcd7e90cf767e48225633795e99d831742cbf3397064fee7712 go1.25.14.linux-amd64.tar.gz
+glab 1.114.0 linux-amd64 00e892a80d586a1e8b8fdc035321923db99dce0caa3b0c4fd72c5337ffdb1c48 glab_1.114.0_linux_amd64.tar.gz

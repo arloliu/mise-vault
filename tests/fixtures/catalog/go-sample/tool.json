@@ -1,0 +1,6 @@
+{
+  "name": "go-sample",
+  "type": "go",
+  "module": "github.com/example/tools/cmd/go-sample",
+  "module_root": "github.com/example/tools"
+}

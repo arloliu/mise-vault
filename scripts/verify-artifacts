@@ -1,26 +1,40 @@
 #!/usr/bin/env python3
-"""Verify every catalog entry against Nexus.
+"""Verify every catalog entry against its backing store.
 
-For each catalog/<tool>/versions.json record and platform:
-  - HEAD the artifact URL — a missing artifact fails the run
-  - with --checksum: download and compare SHA-256 to the catalog value
+For each catalog/<tool>/versions.json record:
+  artifact tools (archive/binary/runtime), for each platform:
+    - HEAD the artifact URL in Nexus — a missing artifact fails the run
+    - with --checksum: download and compare SHA-256 to the catalog value
+  go tools:
+    - GET the version's .info file at the go proxy — missing fails the run
+    - with --checksum, only when the record carries an h1: run
+      "go mod download -json" against the same proxy and compare Sum.
+      A go tool version with no h1 is a deliberate proxy-trust entry
+      (see catalog/<tool>/versions.json); it is reported, not failed.
 
 Auth: curl -n (~/.netrc) plus $NEXUS_CURL_OPTS, same convention as add-version.
+The go proxy fetch is unauthenticated GET, same as any go-proxy client.
 
 Usage:
   scripts/verify-artifacts [--checksum] [--tool T ...]
-                           [--nexus-url URL] [--catalog-dir DIR]
+                           [--nexus-url URL] [--goproxy-url URL] [--catalog-dir DIR]
 Exit code 0 = all verified, 1 = any failure.
 """
 import argparse
 import hashlib
 import json
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+H1_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=\Z")
+# Base URLs get the same shape check the plugin applies at install time,
+# so this gate can never pass a URL the runtime would refuse.
+URL_RE = re.compile(r"^https?://[A-Za-z0-9._~:/%+-]+\Z")
 
 
 def curl(args, text=True, follow=False):
@@ -60,23 +74,95 @@ def probe(url):
     return f"unexpected HTTP {code}"
 
 
+def escape_module_path(path):
+    """Go's module-proxy escaping: uppercase letters become '!' + lowercase.
+    Our catalog enforces lowercase module paths, so this is normally a
+    no-op — kept so a fetch is spec-correct regardless."""
+    return "".join("!" + c.lower() if c.isupper() else c for c in path)
+
+
+def probe_go_version(proxy, module_root, version):
+    """GET the proxy's .info file for this version; None means it exists.
+
+    A plain GET, not HEAD: go's own proxy client only ever uses GET, so a
+    compliant proxy may reject HEAD (405) while serving the version fine.
+    404 and 410 both mean "this module@version does not exist" per the
+    go-proxy protocol."""
+    url = f"{proxy}/{escape_module_path(module_root)}/@v/v{version}.info"
+    r = curl(["-o", "/dev/null", "-w", "%{http_code}", url])
+    if r.returncode != 0:
+        return f"unreachable (curl exit {r.returncode})", url
+    code = (r.stdout or "").strip()[-3:]
+    if code == "200":
+        return None, url
+    if code in ("404", "410"):
+        return f"not found at the go proxy (HTTP {code})", url
+    if code.startswith("3"):
+        return f"server redirected (HTTP {code}) — redirects are refused", url
+    return f"unexpected HTTP {code}", url
+
+
+def go_mod_sum(proxy, module_root, version):
+    """Run "go mod download -json" against the proxy; return (sum, None) or
+    (None, reason). Missing go toolchain is a specific reason, not a crash."""
+    import os
+
+    if shutil.which("go") is None:
+        return None, "no go toolchain on PATH"
+    env = dict(os.environ)
+    # GONOPROXY/GOPRIVATE are pinned too: a developer GOPRIVATE setting
+    # (which doubles as the GONOPROXY default) would otherwise make a
+    # matching module bypass the proxy and fetch from version control.
+    # A fresh module cache per run: go trusts cached module content without
+    # refetching or rehashing it, so an inherited cache could report the
+    # expected checksum for tampered content. GOENV=off keeps "go env -w"
+    # settings out too.
+    with tempfile.TemporaryDirectory() as scratch:
+        env.update({"GOPROXY": proxy, "GONOPROXY": "none", "GOPRIVATE": "",
+                    "GOSUMDB": "off", "GOTOOLCHAIN": "local", "GOENV": "off",
+                    "GOMODCACHE": f"{scratch}/gomodcache", "GOPATH": f"{scratch}/gopath",
+                    "GOCACHE": f"{scratch}/gocache", "GOCACHEPROG": "",
+                    "GOFLAGS": "-mod=mod -modcacherw"})
+        try:
+            p = subprocess.run(
+                ["go", "mod", "download", "-json", f"{module_root}@v{version}"],
+                capture_output=True, text=True, env=env, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return None, f"go mod download could not run: {e}"
+    try:
+        decoded = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        detail = (p.stderr or p.stdout or "").strip().splitlines()
+        return None, detail[0] if detail else f"go mod download exited {p.returncode}"
+    if decoded.get("Error"):
+        return None, decoded["Error"]
+    sum_ = decoded.get("Sum")
+    if not sum_ or not H1_RE.match(sum_):
+        return None, f"go mod download returned no usable Sum: {decoded!r}"
+    return sum_, None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checksum", action="store_true", help="download and verify sha256")
     ap.add_argument("--tool", action="append", help="restrict to these tools")
     ap.add_argument("--nexus-url")
+    ap.add_argument("--goproxy-url")
     ap.add_argument("--catalog-dir", default=str(REPO / "catalog"))
     args = ap.parse_args()
 
-    nexus = args.nexus_url
-    if not nexus:
-        defaults = REPO / "config" / "defaults.json"
-        nexus = json.loads(defaults.read_text()).get("nexus_url") if defaults.exists() else None
-    if not nexus:
-        sys.exit("error: no Nexus URL (pass --nexus-url or set config/defaults.json)")
+    defaults_file = REPO / "config" / "defaults.json"
+    defaults = json.loads(defaults_file.read_text()) if defaults_file.exists() else {}
+    nexus = args.nexus_url or defaults.get("nexus_url")
+    goproxy = args.goproxy_url or defaults.get("goproxy_url")
+    if nexus and not URL_RE.match(nexus):
+        sys.exit(f"error: refusing unsafe Nexus URL: {nexus!r}")
+    if goproxy and not URL_RE.match(goproxy):
+        sys.exit(f"error: refusing unsafe go proxy URL: {goproxy!r}")
 
     failures = 0
     checked = 0
+    skipped = 0
     catalog = Path(args.catalog_dir)
     if args.tool:
         known = {p.name for p in catalog.iterdir() if p.is_dir()}
@@ -92,6 +178,66 @@ def main():
             versions = json.loads((tool_dir / "versions.json").read_text())
         except (OSError, json.JSONDecodeError) as e:
             sys.exit(f"error: unreadable or invalid catalog file under {tool_dir}: {e}")
+
+        if tool.get("type") == "go":
+            if not goproxy:
+                sys.exit("error: no go proxy URL (pass --goproxy-url or set "
+                         "config/defaults.json goproxy_url)")
+            module = tool.get("module", "")
+            module_root = tool.get("module_root", module)
+            for rec in versions:
+                checked += 1
+                reason, url = probe_go_version(goproxy, module_root, rec["version"])
+                if reason is not None:
+                    print(f"FAIL {reason}: {url}")
+                    failures += 1
+                    continue
+                # "go install" resolves a package to the LONGEST module path
+                # existing at the requested version; a module nested below
+                # module_root would shadow it and unbind the recorded h1 from
+                # what actually gets built.
+                shadowed = False
+                if module_root != module:
+                    candidate = module_root
+                    for segment in module[len(module_root) + 1:].split("/"):
+                        candidate += "/" + segment
+                        nested, nurl = probe_go_version(goproxy, candidate, rec["version"])
+                        if nested is None:
+                            print(f"FAIL nested module {candidate} shadows module_root "
+                                  f"{module_root} at v{rec['version']}: {tool_name}")
+                            failures += 1
+                            shadowed = True
+                            break
+                        if "not found" not in nested:
+                            print(f"FAIL could not probe for nested modules "
+                                  f"({nested}): {nurl}")
+                            failures += 1
+                            shadowed = True
+                            break
+                if shadowed:
+                    continue
+                if not args.checksum:
+                    print(f"ok   exists:  {tool_name} {rec['version']} (go proxy)")
+                    continue
+                if "h1" not in rec:
+                    print(f"skip sum check: {tool_name} {rec['version']} carries no h1 "
+                          f"(proxy-trust entry — nothing to compare against)")
+                    skipped += 1
+                    continue
+                sum_, reason = go_mod_sum(goproxy, module_root, rec["version"])
+                if sum_ is None:
+                    print(f"FAIL go mod download ({reason}): {tool_name} {rec['version']}")
+                    failures += 1
+                elif sum_ != rec["h1"]:
+                    print(f"FAIL h1 mismatch: {tool_name} {rec['version']} "
+                          f"(catalog {rec['h1']}, got {sum_})")
+                    failures += 1
+                else:
+                    print(f"ok   h1:      {tool_name} {rec['version']}")
+            continue
+
+        if not nexus:
+            sys.exit("error: no Nexus URL (pass --nexus-url or set config/defaults.json)")
         for rec in versions:
             for plat, pdata in rec["platforms"].items():
                 artifact = tool["platforms"][plat]["artifact"].replace("{version}", rec["version"])
@@ -125,6 +271,8 @@ def main():
                         print(f"ok   sha256:  {tool_name} {rec['version']} {plat}")
 
     mode = "existence+checksum" if args.checksum else "existence"
+    if skipped:
+        mode += f", {skipped} skipped (proxy-trust go versions with no h1)"
     if checked == 0:
         print("verify-artifacts: FAILED — the selection matched no artifacts", file=sys.stderr)
         return 1

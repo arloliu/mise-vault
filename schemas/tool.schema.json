@@ -2,54 +2,93 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gitlab.company.example/devtools/mise-vault/schemas/tool.schema.json",
   "title": "mise-vault tool definition (catalog/<tool>/tool.json)",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["name", "type", "platforms"],
-  "properties": {
-    "name": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9._-]*$",
-      "description": "Tool name; must equal the catalog directory name"
-    },
-    "type": {
-      "enum": ["archive", "binary", "runtime"],
-      "description": "Installation class: plain archive, single binary, or full runtime distribution"
-    },
-    "platforms": {
+  "oneOf": [
+    {
+      "title": "prebuilt artifact from Nexus",
       "type": "object",
-      "minProperties": 1,
       "additionalProperties": false,
-      "patternProperties": {
-        "^(linux|darwin|windows)-(amd64|arm64)$": {
+      "required": ["name", "type", "platforms"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*(?![\\s\\S])",
+          "description": "Tool name; must equal the catalog directory name"
+        },
+        "type": {
+          "enum": ["archive", "binary", "runtime"],
+          "description": "Installation class: plain archive, single binary, or full runtime distribution"
+        },
+        "platforms": {
           "type": "object",
+          "minProperties": 1,
           "additionalProperties": false,
-          "required": ["artifact", "format"],
-          "properties": {
-            "artifact": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9._+-]*\\{version\\}[A-Za-z0-9._+-]*$",
-              "description": "Artifact file name template; only {version} is substituted — each platform spells out its own full name, nothing is inferred from os/arch. Must be a plain file name: no path separators or shell metacharacters"
-            },
-            "format": { "enum": ["tar.gz", "tar.xz", "tar.bz2", "zip", "binary"] },
-            "strip_components": { "type": "integer", "minimum": 0, "maximum": 3 },
-            "bin_paths": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9._+/-]+$",
-                "description": "Relative path inside the install directory; never absolute, never containing '..'"
+          "patternProperties": {
+            "^(linux|darwin|windows)-(amd64|arm64)(?![\\s\\S])": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["artifact", "format"],
+              "properties": {
+                "artifact": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9._+-]*\\{version\\}[A-Za-z0-9._+-]*(?![\\s\\S])",
+                  "description": "Artifact file name template; only {version} is substituted — each platform spells out its own full name, nothing is inferred from os/arch. Must be a plain file name: no path separators or shell metacharacters"
+                },
+                "format": { "enum": ["tar.gz", "tar.xz", "tar.bz2", "zip", "binary"] },
+                "strip_components": { "type": "integer", "minimum": 0, "maximum": 3 },
+                "bin_paths": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9._+/-]+(?![\\s\\S])",
+                    "description": "Relative path inside the install directory; never absolute, never containing '..'"
+                  }
+                }
               }
             }
           }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
         }
       }
     },
-    "env": {
+    {
+      "title": "tool built with go install from a go-proxy module",
       "type": "object",
-      "additionalProperties": { "type": "string" },
-      "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
+      "additionalProperties": false,
+      "required": ["name", "type", "module"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*(?![\\s\\S])",
+          "description": "Tool name; must equal the catalog directory name AND the last path element of module (go install names the binary after it)"
+        },
+        "type": {
+          "const": "go",
+          "description": "Installed by running 'go install <module>@v<version>' against the plugin-controlled GOPROXY"
+        },
+        "module": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[a-z0-9-]*\\.[a-z0-9-]+)+(?:/[a-z0-9_~-](?:[a-z0-9._~-]*[a-z0-9_~-])?)+(?![\\s\\S])",
+          "not": { "pattern": "\\.\\." },
+          "description": "Full package path passed to 'go install'. Lowercase only (uppercase module paths would need go-proxy escaping, which is not implemented, so they are refused), host-looking first segment (contains a dot), at least one slash, no '..', and no path segment starting or ending with a dot (go refuses those)"
+        },
+        "module_root": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[a-z0-9-]*\\.[a-z0-9-]+)+(?:/[a-z0-9_~-](?:[a-z0-9._~-]*[a-z0-9_~-])?)+(?![\\s\\S])",
+          "not": { "pattern": "\\.\\." },
+          "description": "Module root used for 'go mod download' when a version carries an h1 checksum. Must be a prefix of module. Optional: when absent, module itself is treated as the module root"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
+        }
+      }
     }
-  }
+  ]
 }

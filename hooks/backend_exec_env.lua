@@ -5,24 +5,32 @@ function PLUGIN:BackendExecEnv(ctx)
     local file = require("file")
 
     local tool = common.load_tool(ctx.tool)
-    local platform = common.platform()
-    local pconf = tool.platforms[platform]
-    if pconf == nil then
-        error(ctx.tool .. " " .. ctx.version .. " is not available for " .. platform)
-    end
 
     local env_vars = {}
 
-    local bin_paths = pconf.bin_paths or { "." }
-    local rendered = {}
-    for _, p in ipairs(bin_paths) do
-        if p == "." then
-            table.insert(rendered, ctx.install_path)
-        else
-            table.insert(rendered, file.join_path(ctx.install_path, p))
+    if tool.type == "go" then
+        -- go tools carry no platforms entry: the binary always lands in
+        -- install_path/bin (see hooks/backend_install.lua), on every platform
+        -- that already has an approved go toolchain.
+        table.insert(env_vars, { key = "PATH", value = file.join_path(ctx.install_path, "bin") })
+    else
+        local platform = common.platform()
+        local pconf = tool.platforms[platform]
+        if pconf == nil then
+            error(ctx.tool .. " " .. ctx.version .. " is not available for " .. platform)
         end
+
+        local bin_paths = pconf.bin_paths or { "." }
+        local rendered = {}
+        for _, p in ipairs(bin_paths) do
+            if p == "." then
+                table.insert(rendered, ctx.install_path)
+            else
+                table.insert(rendered, file.join_path(ctx.install_path, p))
+            end
+        end
+        table.insert(env_vars, { key = "PATH", value = table.concat(rendered, ":") })
     end
-    table.insert(env_vars, { key = "PATH", value = table.concat(rendered, ":") })
 
     -- sort the keys so the emitted list is deterministic (pairs() order is not)
     local env = tool.env or {}

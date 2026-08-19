@@ -69,6 +69,7 @@ public package indexes once mirrors exist:
 | test image apt packages | `--build-arg APT_MIRROR=http://mirror.../ubuntu` | `docker build test-image/` |
 | mise binary in test image | `--build-arg MISE_BINARY_URL=...` (hosted binary) or `MISE_INSTALL_URL=...` (mirrored install script) | `docker build test-image/` |
 | CI job images | `PYTHON_IMAGE`, `PYTHON_SLIM_IMAGE`, `DEVTOOLS_CI_IMAGE` | GitLab CI variables |
+| Go toolchain for checksum CI | ship go inside `PYTHON_IMAGE` (the job's apt fallback is skipped when the image already has `go`) | GitLab CI variable |
 | CI pip packages | `PIP_INDEX_URL` | GitLab CI variable (pip reads it natively) |
 | runner default job image | `DEFAULT_JOB_IMAGE=...` | env for `provision-runner.sh` |
 | seed scripts (public intake simulation) | standard `http_proxy`/`https_proxy`/`no_proxy` | environment (curl and python urllib honor them) |

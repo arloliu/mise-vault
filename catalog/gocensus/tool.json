@@ -1,0 +1,6 @@
+{
+  "name": "gocensus",
+  "type": "go",
+  "module": "github.com/arloliu/gocensus/cmd/gocensus",
+  "module_root": "github.com/arloliu/gocensus"
+}

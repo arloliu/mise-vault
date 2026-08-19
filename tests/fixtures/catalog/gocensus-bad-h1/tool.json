@@ -1,0 +1,6 @@
+{
+  "name": "gocensus-bad-h1",
+  "type": "go",
+  "module": "github.com/arloliu/gocensus/cmd/gocensus-bad-h1",
+  "module_root": "github.com/arloliu/gocensus"
+}

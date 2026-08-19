@@ -11,6 +11,13 @@ Schemas in schemas/ plus cross-file rules the schemas cannot express:
     (non-numeric schemes skip the order check; order is still authoritative)
   - artifact templates must be plain file names (no path separators or
     shell metacharacters); bin paths must be relative and free of '..'
+  - an artifact-type tool (archive/binary/runtime) must have platform-shaped
+    version entries; a go-type tool must have go-shaped version entries
+    (a version entry never mixes "platforms" and "h1")
+  - a go tool's module must end in the tool name (go install names the
+    binary after the module path's last element)
+  - a go tool's module_root, when present, must be a prefix of module
+    (equal to it, or a parent path of it)
 
 The dep-free built-in checks always run; when the `jsonschema` package is
 available (CI), the formal schemas in schemas/ are validated on top of them.
@@ -25,18 +32,37 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PLATFORM_RE = re.compile(r"^(linux|darwin|windows)-(amd64|arm64)$")
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]*$")
-NUMERIC_RE = re.compile(r"^\d+(\.\d+)*$")
+PLATFORM_RE = re.compile(r"^(linux|darwin|windows)-(amd64|arm64)\Z")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\Z")
+VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]*\Z")
+NUMERIC_RE = re.compile(r"^\d+(\.\d+)*\Z")
 FORMATS = {"tar.gz", "tar.xz", "tar.bz2", "zip", "binary"}
 # An artifact template is a plain file name: no path separators, no shell
 # metacharacters. It renders into download commands and file paths.
-ARTIFACT_RE = re.compile(r"^[A-Za-z0-9._+{}-]+$")
+ARTIFACT_RE = re.compile(r"^[A-Za-z0-9._+{}-]+\Z")
 # A bin path is relative, never escapes the install directory, and contains
 # no shell metacharacters.
-BIN_PATH_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
+BIN_PATH_RE = re.compile(r"^[A-Za-z0-9._+/-]+\Z")
+# A go module path (or module root): lowercase host-looking first segment
+# (contains a dot), at least one more path segment, no '..',
+# and no dots-only path segment ("." or ".." would change which path
+# the module name resolves to).
+# Lowercase only:
+# uppercase module paths need go-proxy escaping, which nothing here
+# implements, so they are refused instead.
+# It is inserted into shell commands,
+# so the character set is deliberately narrow.
+# A path segment may not begin or end with a dot (go refuses those).
+MODULE_RE = re.compile(
+    r"^[a-z0-9]+(?:[a-z0-9-]*\.[a-z0-9-]+)+(?:/[a-z0-9_~-](?:[a-z0-9._~-]*[a-z0-9_~-])?)+\Z")
+# A go tool version is bare (no leading "v"): the plugin prepends the "v"
+# when calling go, so a stored "v0.4.0" would render as "vv0.4.0"
+# and could never install.
+# Lowercase only: the catalog tooling builds proxy URLs from the version
+# literally, and an uppercase version would need go-proxy escaping there.
+GO_VERSION_RE = re.compile(r"^[0-9][a-z0-9.+_-]*\Z")
+H1_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=\Z")
 
 errors = []
 
@@ -64,9 +90,40 @@ def jsonschema_validate(instance, schema_file, path):
         err(path, f"schema: {loc}: {e.message}")
 
 
+def builtin_validate_go_tool(tool, path):
+    for key in ("name", "type", "module"):
+        if key not in tool:
+            err(path, f"missing required field '{key}'")
+    unknown = set(tool) - {"name", "type", "module", "module_root", "env"}
+    if unknown:
+        err(path, f"unknown fields: {sorted(unknown)}")
+    if "name" in tool and not NAME_RE.match(str(tool["name"])):
+        err(path, f"invalid name: {tool['name']!r}")
+    module = tool.get("module")
+    if "module" in tool:
+        if not isinstance(module, str) or not MODULE_RE.match(module) or ".." in module:
+            err(path, f"invalid module: {module!r} (expected a package path like "
+                      f"host.example/org/repo/cmd/tool)")
+        elif "name" in tool and module.rstrip("/").rsplit("/", 1)[-1] != tool["name"]:
+            err(path, f"module {module!r} does not end in the tool name "
+                      f"{tool['name']!r} (go install names the binary after the "
+                      f"module path's last element)")
+    root = tool.get("module_root")
+    if "module_root" in tool:
+        if not isinstance(root, str) or not MODULE_RE.match(root) or ".." in root:
+            err(path, f"invalid module_root: {root!r}")
+        elif isinstance(module, str) and root != module and not module.startswith(root + "/"):
+            err(path, f"module_root {root!r} is not a prefix of module {module!r}")
+    env = tool.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        err(path, "env must be an object of string values")
+
+
 def builtin_validate_tool(tool, path):
     if not isinstance(tool, dict):
         return err(path, "must be a JSON object")
+    if tool.get("type") == "go":
+        return builtin_validate_go_tool(tool, path)
     for key in ("name", "type", "platforms"):
         if key not in tool:
             err(path, f"missing required field '{key}'")
@@ -112,13 +169,31 @@ def builtin_validate_tool(tool, path):
         err(path, "env must be an object of string values")
 
 
-def builtin_validate_versions(versions, path):
+def builtin_validate_go_version_rec(rec, where, path):
+    unknown = set(rec) - {"version", "h1"}
+    if unknown:
+        err(path, f"{where}: unknown fields: {sorted(unknown)}")
+    v = rec.get("version")
+    if not isinstance(v, str) or not GO_VERSION_RE.match(v):
+        err(path, f"{where}: invalid go tool version: {v!r} "
+                  f"(bare version starting with a digit; the plugin prepends the 'v')")
+    if "h1" in rec:
+        h1 = rec.get("h1")
+        if not isinstance(h1, str) or not H1_RE.match(h1):
+            err(path, f"{where}: invalid h1: {h1!r} (expected h1:<43 base64 chars>=)")
+
+
+def builtin_validate_versions(versions, path, tool_type=None):
     if not isinstance(versions, list):
         return err(path, "must be a JSON ARRAY (ordered, oldest-approved first)")
+    is_go = tool_type == "go"
     for i, rec in enumerate(versions):
         where = f"[{i}]"
         if not isinstance(rec, dict):
             err(path, f"{where}: must be an object")
+            continue
+        if is_go:
+            builtin_validate_go_version_rec(rec, where, path)
             continue
         unknown = set(rec) - {"version", "platforms"}
         if unknown:
@@ -210,7 +285,8 @@ def main():
         # no cross-file rules) so the test suite can prove them independently.
         if use_builtin:
             builtin_validate_tool(tool, tool_dir / "tool.json")
-            builtin_validate_versions(versions, tool_dir / "versions.json")
+            tool_type = tool.get("type") if isinstance(tool, dict) else None
+            builtin_validate_versions(versions, tool_dir / "versions.json", tool_type=tool_type)
         if use_schema:
             jsonschema_validate(tool, "tool.schema.json", tool_dir / "tool.json")
             jsonschema_validate(versions, "versions.schema.json", tool_dir / "versions.json")

@@ -1,7 +1,11 @@
 # mise-vault CI: every catalog change is validated before it can merge.
-# Runner requirements: private network access to Nexus; docker or shell executor.
+# Runner requirements: private network access to Nexus AND the go proxy;
+# docker or shell executor.
 # CI/CD variables (Settings -> CI/CD -> Variables, masked):
 #   NEXUS_CI_USER / NEXUS_CI_PASSWORD  — read-only Nexus account
+#   GOPROXY_URL (optional)             — overrides config/defaults.json's
+#     goproxy_url, same idea as NEXUS_URL below, for a CI network where the
+#     go proxy lives under a different address than workstations use
 
 stages:
   - validate
@@ -34,25 +38,38 @@ validate-catalog:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_TAG
 
-# --- artifact existence in Nexus (cheap; every MR) --------------------------
-# NEXUS_URL (CI variable) overrides the committed Nexus base URL when the CI
-# network reaches Nexus under a different address than workstations do.
+# --- artifact existence in Nexus and the go proxy (cheap; every MR) ---------
+# NEXUS_URL / GOPROXY_URL (CI variables) override the committed base URLs
+# when the CI network reaches them under a different address than
+# workstations use.
+# This job only probes existence, never downloads a go module, so it needs
+# no go toolchain.
 verify-artifacts-exist:
   stage: verify
   image: $PYTHON_IMAGE                     # full image ships curl
   script:
-    - scripts/verify-artifacts ${NEXUS_URL:+--nexus-url $NEXUS_URL}
+    - scripts/verify-artifacts ${NEXUS_URL:+--nexus-url $NEXUS_URL} ${GOPROXY_URL:+--goproxy-url $GOPROXY_URL}
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_TAG
 
 # --- full checksum verification (heavier; MRs touching catalog, and tags) ----
+# A go toolchain is required here, and only here: with --checksum, every go
+# tool version that carries an h1 gets verified with "go mod download",
+# exactly like the plugin itself does at install time.
+# A version without an h1 is a deliberate proxy-trust entry and is reported,
+# not failed — see docs/development.md's go-installed tools section.
 verify-artifacts-checksum:
   stage: verify
   image: $PYTHON_IMAGE                     # full image ships curl
+  # On a sealed runner with no public APT mirrors, point PYTHON_IMAGE at an
+  # internal image that already ships a go toolchain — the apt fallback below
+  # only runs when the image has no go.
+  before_script:
+    - command -v go >/dev/null || (apt-get update -qq && apt-get install -qq -y golang-go)
   script:
-    - scripts/verify-artifacts --checksum ${NEXUS_URL:+--nexus-url $NEXUS_URL}
+    - scripts/verify-artifacts --checksum ${NEXUS_URL:+--nexus-url $NEXUS_URL} ${GOPROXY_URL:+--goproxy-url $GOPROXY_URL}
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       changes: [ "catalog/**/*" ]
@@ -65,8 +82,9 @@ install-test:
   stage: test
   image: $DEVTOOLS_CI_IMAGE
   script:
-    # point the linked plugin at the CI-reachable Nexus when overridden
-    - if [ -n "${NEXUS_URL:-}" ]; then printf '{"nexus_url":"%s"}\n' "$NEXUS_URL" > config/defaults.json; fi
+    # point the linked plugin at the CI-reachable Nexus / go proxy when
+    # overridden, keeping every other committed default intact
+    - if [ -n "${NEXUS_URL:-}" ] || [ -n "${GOPROXY_URL:-}" ]; then python3 -c "import json,os; p='config/defaults.json'; d=json.load(open(p)); d['nexus_url']=os.environ.get('NEXUS_URL') or d.get('nexus_url'); d['goproxy_url']=os.environ.get('GOPROXY_URL') or d.get('goproxy_url'); json.dump(d, open(p, 'w'), indent=2)"; fi
     # the plugin downloads with `curl -n`, so the job needs a netrc just like a
     # workstation does; host is taken from the effective Nexus URL
     - NEXUS_HOST=$(python3 -c "import json,urllib.parse;print(urllib.parse.urlparse(json.load(open('config/defaults.json'))['nexus_url']).hostname)")
