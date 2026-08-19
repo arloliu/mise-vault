@@ -4,9 +4,15 @@
 # rejections never reach add-version, and the two failure-message cases
 # point --nexus-url at an unreachable local port so add-version fails fast.
 #
-# Every case is asserted two ways: the process exit code, and that the
-# catalog copy under test is byte-for-byte unchanged afterward — "nothing
-# was written" is the whole point of preflight and of a rejected batch.
+# Every preflight-rejection case is asserted four ways: the process exit
+# code, that the catalog copy under test is byte-for-byte unchanged
+# afterward ("nothing was written" is the whole point of preflight and of a
+# rejected batch), that stderr names the specific preflight diagnostic, and
+# that add-version was never invoked. That last pair matters: without them a
+# case that regresses past preflight can still exit nonzero and leave the
+# catalog untouched by failing later inside add-version (for example its own
+# artifact probe against the unreachable Nexus URL), which would make the
+# test pass for the wrong reason.
 import shutil
 import sys
 import tempfile
@@ -17,6 +23,8 @@ from lib.harness import Suite, run
 
 ROOT = Path(__file__).resolve().parent.parent
 APPROVE = str(ROOT / "scripts" / "approve")
+ADD_VERSION = str(ROOT / "scripts" / "add-version")
+ADD_VERSION_MARKER = f"$ {ADD_VERSION}"
 UNREACHABLE = "http://127.0.0.1:9"  # port 9 (discard) refuses connections immediately
 
 s = Suite("run-approve-tests")
@@ -44,38 +52,50 @@ def fresh_catalog(tmp_root):
     return catalog_dir
 
 
-def assert_rejected(desc, spec, tmp_root):
+def assert_rejected(desc, specs, tmp_root, expect_diagnostic):
+    """Run approve against a fresh catalog copy with the given spec(s) and
+    assert the whole batch was rejected during preflight: nonzero exit, an
+    unchanged catalog, the specific preflight diagnostic in stderr, and no
+    add-version invocation at all -- a rejection that happened to occur
+    later, inside add-version, must not satisfy this check."""
+    if isinstance(specs, str):
+        specs = [specs]
     catalog_dir = fresh_catalog(tmp_root)
     before = snapshot(catalog_dir)
-    r = run([APPROVE, spec, "--catalog-dir", str(catalog_dir),
+    r = run([APPROVE, *specs, "--catalog-dir", str(catalog_dir),
              "--nexus-url", UNREACHABLE])
     after = snapshot(catalog_dir)
     s.check(f"{desc}: rejected (exit != 0)", not r.ok, detail=r.tail())
     s.check(f"{desc}: catalog unchanged", before == after,
             detail="preflight must not write anything")
+    s.check(f"{desc}: preflight diagnostic present",
+            expect_diagnostic in r.err,
+            detail=f"expected {expect_diagnostic!r} in stderr; got {r.tail()}")
+    s.check(f"{desc}: add-version never invoked",
+            ADD_VERSION_MARKER not in r.out,
+            detail="a preflight rejection must never reach add-version")
 
 
 with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
-    assert_rejected("malformed spec", "badspec", tmp)
-    assert_rejected("path-alias tool name", "go/../glab@1.0.0", tmp)
-    assert_rejected("invalid tool grammar (uppercase)", "Bad@1.0.0", tmp)
-    assert_rejected("unknown tool", "doesnotexist@1.0.0", tmp)
+    assert_rejected("malformed spec", "badspec", tmp, "malformed spec")
+    assert_rejected("path-alias tool name", "go/../glab@1.0.0", tmp, "malformed spec")
+    assert_rejected("invalid tool grammar (uppercase)", "Bad@1.0.0", tmp, "malformed spec")
+    assert_rejected("unknown tool", "doesnotexist@1.0.0", tmp, "unknown tool")
+    assert_rejected("duplicate spec", ["glab@9.9.9", "glab@9.9.9"], tmp, "duplicate spec")
+    assert_rejected("already-approved version", "glab@1.113.0", tmp, "already in catalog")
 
-    catalog_dir = fresh_catalog(tmp)
-    before = snapshot(catalog_dir)
-    r = run([APPROVE, "glab@9.9.9", "glab@9.9.9",
-             "--catalog-dir", str(catalog_dir), "--nexus-url", UNREACHABLE])
-    after = snapshot(catalog_dir)
-    s.check("duplicate spec: rejected (exit != 0)", not r.ok, detail=r.tail())
-    s.check("duplicate spec: catalog unchanged", before == after)
+    # A normal spec plus a path-alias spec that targets the very same
+    # catalog file must reject the whole batch, not just the alias.
+    assert_rejected("batch: valid spec + path-alias spec (same target)",
+                     ["glab@7.7.7", "go/../glab@7.7.7"], tmp, "malformed spec")
 
-    catalog_dir = fresh_catalog(tmp)
-    before = snapshot(catalog_dir)
-    r = run([APPROVE, "glab@1.113.0",
-             "--catalog-dir", str(catalog_dir), "--nexus-url", UNREACHABLE])
-    after = snapshot(catalog_dir)
-    s.check("already-approved version: rejected (exit != 0)", not r.ok, detail=r.tail())
-    s.check("already-approved version: catalog unchanged", before == after)
+    # Whitespace regressions: NAME_RE/VERSION_RE must anchor the *entire*
+    # string. A trailing newline once slipped past `.match()` because `$`
+    # matches immediately before a final newline; a leading/embedded space
+    # is never part of either grammar.
+    assert_rejected("trailing newline in version", "glab@1.2.3\n", tmp, "malformed spec")
+    assert_rejected("space before @", "glab @1.2.3", tmp, "malformed spec")
+    assert_rejected("leading space in tool", " glab@1.2.3", tmp, "malformed spec")
 
     # --- failure-message shape: dry run ---
     catalog_dir = fresh_catalog(tmp)
