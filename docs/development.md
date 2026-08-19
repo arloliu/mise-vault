@@ -97,9 +97,10 @@ git tag v0.0.X && git push experiment v0.0.X
 | `experiment/scripts/offline-test` | everything again inside a Docker network with **no route to the internet** — the release gate: run it before tagging a release | ~2 min |
 | `scripts/validate-catalog` | catalog schema + rules, no network | seconds |
 | `tests/run-validator-tests` | the validator provably REJECTS unsafe catalog shapes (`tests/fixtures/invalid-catalog/`), no network | seconds |
+| `tests/run-approve-tests` | approve pre-flight must REJECT malformed or duplicate batch specs before any write, no network | seconds |
 | `scripts/verify-artifacts --checksum` | every catalog entry exists in Nexus and hashes match (`NEXUS_CURL_OPTS="-u user:pass"` for auth) | ~1 min |
 
-The four test suites are Python on a shared harness in `tests/lib`, verified standalone by `tests/run-harness-selftest`.
+The five test suites are Python on a shared harness in `tests/lib`, verified standalone by `tests/run-harness-selftest`.
 
 What the pass counts vouch for:
 `poc-test` runs its behavior matrix against your **working tree**

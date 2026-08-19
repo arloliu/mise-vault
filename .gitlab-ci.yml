@@ -26,6 +26,9 @@ validate-catalog:
     - scripts/validate-catalog
     # the validator must also provably REJECT unsafe catalog shapes
     - tests/run-validator-tests
+    # approve pre-flight must also provably REJECT malformed or duplicate
+    # batch specs before any write
+    - tests/run-approve-tests
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
