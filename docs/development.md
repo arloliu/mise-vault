@@ -217,19 +217,9 @@ Then open a merge request with the diff — it should be one small appended reco
    }
    ```
 
-   Field rules (enforced by the validator, so trying is cheap):
-   - `name` must equal the directory name.
-   - `platforms` keys are canonical ids (`linux-amd64`, `darwin-arm64`, ...);
-     list exactly the platforms you uploaded — installs on any other platform fail closed.
-   - `artifact` is an explicit file name template per platform;
-     only `{version}` is substituted, nothing is inferred from OS or architecture.
-     It must be a plain file name — no path separators, no shell metacharacters.
-   - `format`: `tar.gz` / `tar.xz` / `tar.bz2` / `zip`, or `binary`
-     for a single executable copied as `<install_path>/<tool>` and marked executable.
-   - `bin_paths`: directories (relative to the install dir, `.` allowed, `..` never)
-     that go on PATH.
-   - `env` (optional): extra environment variables;
-     `{install_path}` and `{version}` are substituted (e.g. `"GOROOT": "{install_path}"`).
+   Every field is explained with worked examples in the
+   [`tool.json` field reference](#tooljson-field-reference) below.
+   The validator enforces all of those rules, so trying is cheap.
 
 3. Approve the first version and validate — same command as above:
 
@@ -248,6 +238,120 @@ Fixture note: `tests/fixtures/catalog/` holds schema-VALID entries that fail at
 runtime on purpose (wrong checksum, unsupported platform) for the behavior suites;
 `tests/fixtures/invalid-catalog/` holds the shapes the validator must REJECT,
 exercised by `tests/run-validator-tests`.
+
+### `tool.json` field reference
+
+A `tool.json` answers exactly two questions:
+how to fetch and unpack one artifact per platform (used at **install** time),
+and what the shell needs once the tool is installed (used at **activation** time).
+
+Top-level fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | must equal the catalog directory name (`catalog/<name>/tool.json`) |
+| `type` | yes | classification for humans reading the catalog: `archive`, `binary`, or `runtime`. Install behavior keys off each platform's `format`, not off `type` |
+| `platforms` | yes | one entry per supported platform — every per-platform field below lives here |
+| `env` | no | extra environment variables at activation — see below |
+
+#### `platforms` — list exactly what you uploaded
+
+Keys are canonical `<os>-<arch>` ids: `linux-amd64`, `linux-arm64`, `darwin-arm64`, ...
+A platform missing here (or missing from the version record) fails closed with
+`<tool> <version> is not available for <platform>` — so listing a platform is a
+promise that its artifact exists in Nexus for every approved version.
+
+#### `artifact` — the exact file name in Nexus, spelled out per platform
+
+The download URL is `<nexus_url>/<tool>/<version>/<artifact>`.
+Only `{version}` is substituted; nothing is ever inferred from OS or architecture,
+which is why each platform spells out its own complete file name:
+
+```json
+"linux-amd64":  { "artifact": "glab_{version}_linux_amd64.tar.gz",  ... },
+"darwin-arm64": { "artifact": "glab_{version}_darwin_arm64.tar.gz", ... }
+```
+
+With version `1.113.0` the first becomes `glab_1.113.0_linux_amd64.tar.gz`.
+It must be a plain file name — no path separators, no shell metacharacters;
+the plugin refuses anything else before building the URL.
+
+#### `format` — how the artifact unpacks
+
+- `tar.gz` / `tar.xz` / `tar.bz2` / `zip` — extracted into the tool's install
+  directory, honoring `strip_components`.
+- `binary` — the artifact IS the executable: it is copied to
+  `<install_path>/<tool>` and marked executable
+  (`strip_components` does not apply; leave `bin_paths` at its `["."]` default).
+
+#### `strip_components` — flatten the archive's wrapper directory
+
+Same meaning as `tar --strip-components`:
+how many leading path components to drop from every entry while extracting.
+Default `0`.
+Decide by listing the archive — two real cases from this catalog:
+
+```console
+$ tar tzf golangci-lint-2.12.2-linux-amd64.tar.gz | head -3
+golangci-lint-2.12.2-linux-amd64/LICENSE
+golangci-lint-2.12.2-linux-amd64/README.md
+golangci-lint-2.12.2-linux-amd64/golangci-lint
+```
+
+Everything sits inside one versioned wrapper directory, so `strip_components: 1`
+places `golangci-lint` directly in the install dir (then `bin_paths: ["."]`).
+
+```console
+$ tar tzf glab_1.113.0_linux_amd64.tar.gz | head -4
+CHANGELOG.md
+LICENSE
+README.md
+bin/glab
+```
+
+No wrapper — the layout is already right, so `strip_components: 0`
+(then `bin_paths: ["bin"]`).
+
+Rule of thumb: if every entry starts with the same wrapper directory
+(usually named after the version), use `1`; otherwise `0`.
+
+#### `bin_paths` — which installed directories go on PATH
+
+Directories relative to the install dir whose executables should be on PATH,
+in order; `"."` is the install dir itself.
+Never absolute, never containing `..`.
+Omitted means `["."]`.
+
+- golangci-lint (after `strip_components: 1`): executable at `<install>/golangci-lint` → `["."]`
+- glab: executable at `<install>/bin/glab` → `["bin"]`
+- go: executables at `<install>/bin/go`, `<install>/bin/gofmt` → `["bin"]`
+
+#### `env` — extra environment variables at activation
+
+Optional and top-level (not per-platform). Exported whenever the tool is
+active, alongside PATH. Values may use `{install_path}` and `{version}`:
+
+```json
+"env": { "GOROOT": "{install_path}" }
+```
+
+Use it for runtime distributions that need a home variable
+(`GOROOT`, `JAVA_HOME`, ...); ordinary CLI tools do not need it.
+
+## Nexus URL override channels
+
+The plugin builds every download URL from one base, resolved first match wins:
+
+1. `MISE_VAULT_NEXUS_URL` environment variable —
+   a shell export, or an `[env]` entry in a trusted `mise.toml`
+   (handy for ad-hoc testing against a scratch Nexus without touching any config);
+2. per-tool `nexus_url` option
+   (`[tools]` entry or a bracketed alias option, e.g. `vault:go[nexus_url=...]`);
+3. `config/defaults.json` bundled in the plugin checkout.
+
+Every channel passes the same URL-shape validation before use,
+and the plugin never follows redirects, whichever channel supplied the URL.
+Covered end-to-end by poc-test's override phase.
 
 ## Testing conventions
 
