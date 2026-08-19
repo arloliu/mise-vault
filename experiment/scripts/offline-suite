@@ -27,15 +27,16 @@ def safe_versions(tool, root):
     later phase still runs through to the final summary."""
     try:
         return catalog.versions(tool, root)
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError, TypeError):
         return []
 
 
 def safe_latest(tool, root):
     try:
         return catalog.latest(tool, root)
-    except (OSError, ValueError, IndexError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
         return ""
+
 
 s.phase("0. the network really is offline")
 
