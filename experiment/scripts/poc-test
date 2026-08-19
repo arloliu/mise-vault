@@ -120,7 +120,37 @@ s.check(f"GOROOT exported and valid ({goroot_out})",
         bool(goroot_out) and Path(goroot_out, "src").is_dir(),
         detail=f"got: '{goroot_out}'")
 
-s.phase("Phase 5: .tool-versions compatibility (asdf golang name)")
+s.phase("Phase 5: MISE_VAULT_NEXUS_URL overrides every other URL channel")
+# env var pointing at a dead port must beat the alias option (which points at
+# the real Nexus), so the forced reinstall must fail against the env URL
+BAD_NEXUS = "http://127.0.0.1:9/repository/devtools"
+env_bad = {**home.env, "MISE_VAULT_NEXUS_URL": BAD_NEXUS}
+r = run(["mise", "install", "-f", f"golangci-lint@{GCL_V}"], env=env_bad)
+s.check("env var beats the alias nexus_url option (install fails on the env URL)",
+        (not r.ok) and "127.0.0.1:9" in (r.out + r.err), detail=r.tail())
+env_unsafe = {**home.env, "MISE_VAULT_NEXUS_URL": "http://127.0.0.1:9/a`whoami`"}
+r = run(["mise", "install", "-f", f"golangci-lint@{GCL_V}"], env=env_unsafe)
+s.check("unsafe env URL refused with a specific error",
+        (not r.ok) and "refusing unsafe nexus_url" in (r.out + r.err), detail=r.tail())
+# an [env] entry in a trusted mise.toml must reach the plugin hook too
+proj_env = home.path / "proj-env"
+proj_env.mkdir(parents=True, exist_ok=True)
+(proj_env / "mise.toml").write_text(f'[env]\nMISE_VAULT_NEXUS_URL = "{BAD_NEXUS}"\n')
+run(["mise", "trust", "-q"], cwd=str(proj_env), env=home.env)
+r = run(["mise", "install", "-f", f"golangci-lint@{GCL_V}"], cwd=str(proj_env), env=home.env)
+s.check("mise.toml [env] MISE_VAULT_NEXUS_URL reaches the hook (install fails on it)",
+        (not r.ok) and "127.0.0.1:9" in (r.out + r.err), detail=r.tail())
+# positive direction: the alias option is broken and the env var carries the
+# real URL — success proves the env var wins (and restores the tool for the
+# phases below, which expect golangci-lint installed)
+home.write_aliases({**ALIASES,
+    "golangci-lint": "vault:golangci-lint[nexus_url=http://127.0.0.1:9/repository/devtools]"})
+env_good = {**home.env, "MISE_VAULT_NEXUS_URL": f"{NEXUS_HOST_URL}/repository/devtools"}
+s.check_cmd("env var with the real URL wins over a broken alias option",
+            ["mise", "install", "-f", f"golangci-lint@{GCL_V}"], env=env_good)
+home.write_aliases(ALIASES)
+
+s.phase("Phase 6: .tool-versions compatibility (asdf golang name)")
 proj = home.path / "proj"
 proj.mkdir(parents=True, exist_ok=True)
 # .tool-versions uses asdf's tool name 'golang', which the plugin must map to 'go'
@@ -130,7 +160,7 @@ v = run(["mise", "exec", "--", "go", "version"], cwd=str(proj), env=home.env)
 s.check(f".tool-versions 'golang {GO_V}' resolves through vault backend",
         f"go{GO_V}" in v.out, detail=v.tail())
 
-s.phase("Phase 6: fail-closed")
+s.phase("Phase 7: fail-closed")
 s.check_fail("unknown tool rejected (vault:foo)", ["mise", "install", "vault:foo@1.0.0"], env=home.env)
 s.check_fail("unapproved version rejected (golangci-lint@9.9.9)",
              ["mise", "install", "golangci-lint@9.9.9"], env=home.env)
@@ -144,7 +174,7 @@ s.check("checksum mismatch aborts install with explicit error",
         (not r.ok) and ("sha-256" in combined or "sha256" in combined),
         detail=f"exit={r.rc}; out: {(r.out + r.err)[:150]}")
 
-s.phase("Phase 7: redirect refusal + successful single-binary install")
+s.phase("Phase 8: redirect refusal + successful single-binary install")
 # correct the smoke fixture's sha256 in the LINKED catalog so the only thing
 # standing between mise and a successful install is the transport policy
 smoke_tmp = home.path / "smoke-0.0.1.txt"
@@ -185,7 +215,7 @@ s.check("binary installed executable at $install_path/smoke",
         os.access(smoke_bin, os.X_OK),
         detail=f"expected executable: {smoke_bin}")
 
-s.phase("Phase 8: an alias to an uninstalled plugin must NOT auto-install it")
+s.phase("Phase 9: an alias to an uninstalled plugin must NOT auto-install it")
 # bootstrap pre-installs the plugin because of exactly this behavior;
 # if mise ever starts auto-installing here, bootstrap's assumptions change
 home2 = IsolatedHome("mise-vault-poc2.")

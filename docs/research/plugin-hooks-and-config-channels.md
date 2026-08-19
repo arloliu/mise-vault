@@ -333,3 +333,34 @@ Treat env-var support as a stretch goal pending a PoC, not a documented feature,
   Optionally add a warn-only staleness check inside `BackendListVersions` (no file writes from that hook) pointing the user at the task.
   Document the task prominently since nothing will remind the user automatically beyond that warning.
 - **Nexus URL (Question B)**: use `[tool_alias] <tool> = "vault:<tool>[nexus_url=https://...]"` as the generated default (confirmed end-to-end via `split_bracketed_opts` → `get_backend_alias_opts` → `resolve_tool_opts_with_overrides` → `ctx.options`), let `[tools]`-table entries and inline CLI brackets override it (same confirmed precedence chain), and treat an env-var override as unverified/future work pending a PoC rather than a documented supported path.
+
+---
+
+## Correction (2026-08-19) — the PoC this document asked for was run, and B.1's source reading does not hold empirically
+
+"Key risks / unknowns" above flagged that B.1 was source-derived
+and recommended a throwaway PoC plugin before committing to any env-based design.
+That PoC was run against the installed mise 2026.8.8:
+instrumented `BackendListVersions` and `BackendInstall` hooks in an isolated `$HOME`,
+probing `os.getenv` directly.
+Observed, in BOTH hooks:
+
+- a plain shell-exported variable (`MISE_VAULT_NEXUS_URL`, plus an unprefixed control variable)
+  IS returned by `os.getenv`;
+- a plain `[env] VAR = "value"` entry in a trusted `mise.toml` IS returned by `os.getenv`
+  when the command runs inside that project directory — no `{ tools = true }` marker needed;
+- ordinary process variables (`HOME`, `PATH`, `USER`) are visible as well;
+- subprocesses spawned via the `cmd` module see the same values.
+
+So on the currently installed mise,
+`os.getenv` in these two hooks behaves like the stock function reading the (config-augmented) process environment.
+The sanitized `mise_env` registry-table behavior traced from source at commit 33073d5e either changed in a later release
+or does not gate these code paths the way the trace concluded.
+Per the repository's verification discipline the experiment wins:
+the env-var channel IS usable.
+
+Consequence:
+D6's "env-var override is NOT a supported path" is amended (see SYNTHESIS.md section 18) —
+`MISE_VAULT_NEXUS_URL` is now the highest-precedence Nexus URL channel,
+validated like every other channel in `lib/common.lua` and covered by poc-test.
+The B.1/B.4 text above is retained unedited as the record of what the source trace concluded.

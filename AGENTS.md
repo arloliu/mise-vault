@@ -89,9 +89,11 @@ The operative rules:
 - The Nexus base URL is committed in `config/defaults.json` (it is not a secret; auth never lives in URLs)
   and read from the plugin checkout at install time,
   so it always matches the installed plugin version.
-  A per-project tool option can override it; generated aliases are pure routing and carry no URL.
-  Environment variables are NOT a supported channel —
-  mise sandboxes `os.getenv` inside plugin hooks (see lessons below).
+  Override precedence, first match wins: the `MISE_VAULT_NEXUS_URL` environment variable
+  (a shell export, or an `[env]` entry in a trusted mise.toml)
+  > per-tool `nexus_url` option > `config/defaults.json`.
+  Generated aliases are pure routing and carry no URL.
+  Every channel passes the same URL-shape validation before use.
 - Sidecar checksum files in Nexus (`<artifact>.sha256sum`) feed `scripts/add-version` only.
   Installation verifies against the catalog value exclusively:
   a checksum stored next to the artifact it describes proves nothing if the store is compromised.
@@ -111,9 +113,13 @@ The operative rules:
 - **mise clones plugins with a built-in Rust git by default.**
   netrc and credential helpers only work after setting `gix = false` AND `libgit2 = false`
   (the code path is selected by OR of the two settings).
-- **`os.getenv` inside plugin Lua hooks does not read the real environment.**
-  mise routes it through a sanitized internal table that omits almost everything.
-  Subprocesses started via the `cmd` module DO inherit the real environment
+- **`os.getenv` inside plugin Lua hooks DOES read the real environment**
+  (verified empirically in both `BackendListVersions` and `BackendInstall`):
+  shell exports and plain `[env]` entries from a trusted mise.toml are both visible.
+  An earlier source-derived conclusion said mise routes it through a sanitized table
+  that omits almost everything; the experiment contradicts that
+  (correction recorded in `docs/research/plugin-hooks-and-config-channels.md`).
+  Subprocesses started via the `cmd` module also inherit the real environment
   (which is why `curl -n` finds `~/.netrc`).
 - **The Lua plugin API has archive extraction but no hashing.**
   `archiver.decompress` handles tar.gz/tar.xz/tar.bz2/zip; SHA-256 must shell out.

@@ -90,9 +90,16 @@ local function check_nexus_url(url, origin)
     return url
 end
 
---- Nexus base URL: per-tool option (from [tool_alias] bracketed opts or [tools])
---- wins over the default bundled in config/defaults.json.
+--- Nexus base URL, first match wins:
+---   1. MISE_VAULT_NEXUS_URL environment variable
+---      (a shell export, or an [env] entry in a trusted mise.toml)
+---   2. per-tool option nexus_url (from [tool_alias] bracketed opts or [tools])
+---   3. the default bundled in config/defaults.json
 function M.nexus_base(options)
+    local env_url = os.getenv("MISE_VAULT_NEXUS_URL")
+    if env_url ~= nil and env_url ~= "" then
+        return check_nexus_url(env_url, "MISE_VAULT_NEXUS_URL environment variable")
+    end
     if options ~= nil and options.nexus_url ~= nil and options.nexus_url ~= "" then
         return check_nexus_url(options.nexus_url, "tool option")
     end
