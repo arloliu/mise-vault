@@ -1,6 +1,7 @@
 # Python Test Harness Migration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
+> **For agentic workers:** implement this plan task-by-task,
+> dispatching each task to a subagent where that fits the session's workflow.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the four bash test suites with Python equivalents on a small shared stdlib-only harness, migrating every check 1:1.
@@ -11,7 +12,7 @@ Suites stay phase-structured and stateful; no test framework is used.
 **Tech Stack:** Python 3 standard library only.
 No pip packages, no bash test code.
 
-**Spec:** `docs/superpowers/specs/2026-08-19-python-test-harness-design.md` — read it first; it defines the harness API and the per-suite notes this plan implements.
+**Spec:** `docs/specs/2026-08-19-python-test-harness-design.md` — read it first; it defines the harness API and the per-suite notes this plan implements.
 
 ## Global Constraints
 
