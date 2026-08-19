@@ -46,9 +46,9 @@ def parse_spec(spec):
     tool, sep, version = spec.partition("@")
     if not sep or not tool or not version or "@" in version:
         return None, None, None
-    if not NAME_RE.match(tool):
+    if not NAME_RE.fullmatch(tool):
         return None, None, "invalid tool name"
-    if not VERSION_RE.match(version):
+    if not VERSION_RE.fullmatch(version):
         return None, None, "invalid version"
     return tool, version, None
 
