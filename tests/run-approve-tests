@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+# Regression coverage for scripts/approve's preflight and failure-message
+# behavior. No network reachable to a real Nexus is needed: preflight
+# rejections never reach add-version, and the two failure-message cases
+# point --nexus-url at an unreachable local port so add-version fails fast.
+#
+# Every case is asserted two ways: the process exit code, and that the
+# catalog copy under test is byte-for-byte unchanged afterward — "nothing
+# was written" is the whole point of preflight and of a rejected batch.
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.harness import Suite, run
+
+ROOT = Path(__file__).resolve().parent.parent
+APPROVE = str(ROOT / "scripts" / "approve")
+UNREACHABLE = "http://127.0.0.1:9"  # port 9 (discard) refuses connections immediately
+
+s = Suite("run-approve-tests")
+
+
+def snapshot(catalog_dir):
+    """Every file's relative path and contents, so any write at all -- not
+    just a version count change -- is caught by comparing snapshots."""
+    return {
+        str(p.relative_to(catalog_dir)): p.read_bytes()
+        for p in sorted(Path(catalog_dir).rglob("*")) if p.is_file()
+    }
+
+
+CASE_COUNT = [0]
+
+
+def fresh_catalog(tmp_root):
+    """A throwaway copy of the real catalog; scripts/approve is pointed at
+    this copy so the test never touches the repository's own catalog/.
+    Each call gets its own subdirectory so cases never share state."""
+    CASE_COUNT[0] += 1
+    catalog_dir = Path(tmp_root) / f"catalog-{CASE_COUNT[0]}"
+    shutil.copytree(ROOT / "catalog", catalog_dir)
+    return catalog_dir
+
+
+def assert_rejected(desc, spec, tmp_root):
+    catalog_dir = fresh_catalog(tmp_root)
+    before = snapshot(catalog_dir)
+    r = run([APPROVE, spec, "--catalog-dir", str(catalog_dir),
+             "--nexus-url", UNREACHABLE])
+    after = snapshot(catalog_dir)
+    s.check(f"{desc}: rejected (exit != 0)", not r.ok, detail=r.tail())
+    s.check(f"{desc}: catalog unchanged", before == after,
+            detail="preflight must not write anything")
+
+
+with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
+    assert_rejected("malformed spec", "badspec", tmp)
+    assert_rejected("path-alias tool name", "go/../glab@1.0.0", tmp)
+    assert_rejected("invalid tool grammar (uppercase)", "Bad@1.0.0", tmp)
+    assert_rejected("unknown tool", "doesnotexist@1.0.0", tmp)
+
+    catalog_dir = fresh_catalog(tmp)
+    before = snapshot(catalog_dir)
+    r = run([APPROVE, "glab@9.9.9", "glab@9.9.9",
+             "--catalog-dir", str(catalog_dir), "--nexus-url", UNREACHABLE])
+    after = snapshot(catalog_dir)
+    s.check("duplicate spec: rejected (exit != 0)", not r.ok, detail=r.tail())
+    s.check("duplicate spec: catalog unchanged", before == after)
+
+    catalog_dir = fresh_catalog(tmp)
+    before = snapshot(catalog_dir)
+    r = run([APPROVE, "glab@1.113.0",
+             "--catalog-dir", str(catalog_dir), "--nexus-url", UNREACHABLE])
+    after = snapshot(catalog_dir)
+    s.check("already-approved version: rejected (exit != 0)", not r.ok, detail=r.tail())
+    s.check("already-approved version: catalog unchanged", before == after)
+
+    # --- failure-message shape: dry run ---
+    catalog_dir = fresh_catalog(tmp)
+    before = snapshot(catalog_dir)
+    r = run([APPROVE, "glab@8.8.8", "--dry-run",
+             "--catalog-dir", str(catalog_dir), "--nexus-url", UNREACHABLE])
+    after = snapshot(catalog_dir)
+    combined = r.out + r.err
+    s.check("dry-run failure: exit 1", r.rc == 1, detail=r.tail())
+    s.check("dry-run failure: no 'already appended' wording",
+            "already appended" not in combined)
+    s.check("dry-run failure: no git-checkout hint",
+            "git checkout" not in combined)
+    s.check("dry-run failure: catalog unchanged", before == after)
+
+    # --- failure-message shape: real run (no --dry-run) ---
+    catalog_dir = fresh_catalog(tmp)
+    before = snapshot(catalog_dir)
+    r = run([APPROVE, "glab@8.8.8",
+             "--catalog-dir", str(catalog_dir), "--nexus-url", UNREACHABLE])
+    after = snapshot(catalog_dir)
+    combined = r.out + r.err
+    s.check("real-run failure (first spec): exit 1", r.rc == 1, detail=r.tail())
+    s.check("real-run failure (first spec): catalog unchanged", before == after)
+
+sys.exit(s.finish())
