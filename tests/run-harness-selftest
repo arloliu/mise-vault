@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# Self-test for tests/lib: exercises the harness with no network and no
+# experiment stack, so a broken helper is caught before any suite uses it.
+import http.client
+import io
+import sys
+from contextlib import redirect_stdout
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.harness import Result, Suite, run
+from lib import catalog, env, servers
+
+ROOT = Path(__file__).resolve().parent.parent
+failures = []
+
+
+def expect(desc, cond):
+    print(("  PASS  " if cond else "  FAIL  ") + desc, flush=True)
+    if not cond:
+        failures.append(desc)
+
+
+# --- run() ---
+r = run(["true"])
+expect("run: zero exit reported ok", r.ok and r.rc == 0)
+r = run(["false"])
+expect("run: nonzero exit reported not ok", not r.ok)
+r = run(["sh", "-c", "echo out; echo err >&2; exit 3"])
+expect("run: captures stdout/stderr/rc", r.rc == 3 and "out" in r.out and "err" in r.err)
+r = run(["sleep", "5"], timeout=1)
+expect("run: timeout becomes a failed Result, not an exception",
+       not r.ok and "timed out" in r.err)
+r = run(["this-binary-does-not-exist-xyz"])
+expect("run: missing binary becomes a failed Result", not r.ok)
+expect("run: tail() flattens and truncates",
+       Result(0, "a\n" * 300, "").tail(10) == ("a " * 300).strip()[-10:])
+
+# --- Suite bookkeeping and output format ---
+buf = io.StringIO()
+with redirect_stdout(buf):
+    s = Suite("selftest-inner")
+    s.phase("Phase X")
+    s.check("good", True)
+    s.check("bad", False, detail="why it broke")
+    s.check_cmd("cmd ok", ["true"])
+    s.check_fail("cmd must fail", ["false"])
+    rc = s.finish()
+out = buf.getvalue()
+expect("Suite: counts passes and failures", s.passed == 3 and s.failed == 1)
+expect("Suite: failure makes finish() return 1", rc == 1)
+expect("Suite: PASS/FAIL line format", "  PASS  good" in out and "  FAIL  bad" in out)
+expect("Suite: failure detail printed", "why it broke" in out)
+expect("Suite: phase header format", "== Phase X ==" in out)
+expect("Suite: summary line", "RESULT: 3 passed, 1 failed" in out)
+buf = io.StringIO()
+with redirect_stdout(buf):
+    s2 = Suite("selftest-inner2")
+    s2.check("fine", True)
+    rc2 = s2.finish()
+expect("Suite: all-pass makes finish() return 0", rc2 == 0)
+
+# --- IsolatedHome ---
+home = env.IsolatedHome("selftest.")
+netrc = home.path / ".netrc"
+expect("IsolatedHome: netrc written mode 600",
+       netrc.exists() and (netrc.stat().st_mode & 0o777) == 0o600)
+expect("IsolatedHome: netrc lists the experiment machines",
+       "machine 127.0.0.3" in netrc.read_text() and "machine 127.0.0.2" in netrc.read_text())
+settings = (home.path / ".config/mise/config.toml").read_text()
+expect("IsolatedHome: gix and libgit2 forced off", "gix = false" in settings and "libgit2 = false" in settings)
+e = home.env
+expect("IsolatedHome: env swaps HOME and strips MISE_* overrides",
+       e["HOME"] == str(home.path) and not any(k.startswith("MISE_") for k in e))
+expect("IsolatedHome: env disables git prompts", e.get("GIT_TERMINAL_PROMPT") == "0")
+home.write_aliases({"glab": "vault:glab"})
+conf = (home.path / ".config/mise/conf.d/mise-vault.toml").read_text()
+expect("IsolatedHome: alias writer emits tool_alias entries",
+       "[tool_alias]" in conf and 'glab = "vault:glab"' in conf)
+kept = env.IsolatedHome("selftest-keep.")
+buf = io.StringIO()
+with redirect_stdout(buf):
+    s3 = Suite("selftest-inner3")
+    s3.check("boom", False)
+    s3.finish(keep_on_failure=[kept])
+expect("Suite: failing finish keeps the home and prints its path",
+       kept.path.exists() and str(kept.path) in buf.getvalue())
+kept.remove()
+buf = io.StringIO()
+with redirect_stdout(buf):
+    s4 = Suite("selftest-inner4")
+    s4.check("fine", True)
+    s4.finish(keep_on_failure=[home])
+expect("Suite: passing finish removes the home", not home.path.exists())
+
+bare = env.IsolatedHome("selftest-bare.", write_settings=False)
+expect("IsolatedHome: write_settings=False leaves mise settings to install.sh",
+       not (bare.path / ".config/mise/config.toml").exists())
+bare.remove()
+
+# --- catalog ---
+vs = catalog.versions("go", ROOT)
+expect("catalog: versions() returns the ordered list", len(vs) >= 1 and vs[-1] == catalog.latest("go", ROOT))
+
+# --- redirect server ---
+log = Path("/tmp/selftest-redirect.log")
+log.write_text("")
+with servers.redirect_server(18099, "http://127.0.0.2:8081", str(log)):
+    conn = http.client.HTTPConnection("127.0.0.1", 18099, timeout=5)
+    conn.request("GET", "/probe/path")
+    resp = conn.getresponse()
+    expect("redirect_server: answers 302 toward the target",
+           resp.status == 302 and resp.getheader("Location") == "http://127.0.0.2:8081/probe/path")
+expect("redirect_server: logs every request path", "/probe/path" in log.read_text())
+log.unlink()
+
+print(f"\nrun-harness-selftest: {'OK' if not failures else 'FAILED: ' + ', '.join(failures)}", flush=True)
+sys.exit(1 if failures else 0)
