@@ -245,35 +245,35 @@ function M.check_crate_name(crate, label)
     return crate
 end
 
---- Lowercase semver envelope shared by npm and cargo versions
+--- Semver envelope shared by npm and cargo versions
 --- ("major.minor.patch" plus optional "-prerelease" and "+build" parts).
---- This is an envelope, not a semver implementation: it does not enforce
---- semver's leading-zero or empty-identifier rules, and it does not accept
---- uppercase (npm/cargo prerelease segments may legally contain uppercase,
---- e.g. "1.0.0-RC.1", but such versions cannot be approved as-is — widening
---- this is a small reviewed change). scripts/add-version's registry probe
---- is the real semantic check.
+--- The core triple is digits-only; letters (either case, e.g. "1.0.0-RC.1")
+--- are accepted only inside the prerelease and build segments, matching
+--- what npm and cargo registries legally serve. This is an envelope, not a
+--- semver implementation: it does not enforce semver's leading-zero or
+--- empty-identifier rules. scripts/add-version's registry probe is the
+--- real semantic check.
 function M.check_semver_envelope(version, label)
     if type(version) ~= "string" or version == "" then
         error(label .. " is not a valid version: " .. tostring(version))
     end
     local rest = version:match("^%d+%.%d+%.%d+(.*)$")
     if rest == nil then
-        error(label .. " is not a valid version (expected a lowercase " ..
-              "major.minor.patch envelope): " .. version)
+        error(label .. " is not a valid version (expected a " ..
+              "major.minor.patch envelope with a digits-only core): " .. version)
     end
     if rest ~= "" then
         local ok = false
-        if rest:match("^%-[%l%d%.%-]+%+[%l%d%.%-]+$") ~= nil then
+        if rest:match("^%-[%dA-Za-z%.%-]+%+[%dA-Za-z%.%-]+$") ~= nil then
             ok = true
-        elseif rest:match("^%-[%l%d%.%-]+$") ~= nil then
+        elseif rest:match("^%-[%dA-Za-z%.%-]+$") ~= nil then
             ok = true
-        elseif rest:match("^%+[%l%d%.%-]+$") ~= nil then
+        elseif rest:match("^%+[%dA-Za-z%.%-]+$") ~= nil then
             ok = true
         end
         if not ok then
-            error(label .. " is not a valid version (expected a lowercase " ..
-                  "major.minor.patch envelope): " .. version)
+            error(label .. " is not a valid version (letters are only " ..
+                  "allowed in the prerelease and build segments): " .. version)
         end
     end
     return version

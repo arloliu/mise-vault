@@ -95,7 +95,7 @@ URL_RE = re.compile(r"^https?://[A-Za-z0-9._~:/%+-]+\Z")
 # structured as importable modules). Keep these in sync by hand.
 NPM_PACKAGE_RE = re.compile(r"^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*\Z")
 PYPI_PACKAGE_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
-SEMVER_ENVELOPE_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?(\+[0-9a-z.-]+)?\Z")
+SEMVER_ENVELOPE_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?\Z")
 PEP440_ENVELOPE_RE = re.compile(
     r"^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?"
     r"(\+[0-9a-z]+(\.[0-9a-z]+)*)?\Z")
@@ -750,7 +750,7 @@ def add_npm_version(args, tool, versions_file, versions):
         sys.exit(f"error: {tool.get('name')} has an invalid npm package in tool.json: {package!r}")
     if not SEMVER_ENVELOPE_RE.match(args.version):
         sys.exit(f"error: version {args.version!r} does not match the npm version envelope "
-                 f"(lowercase semver: MAJOR.MINOR.PATCH[-pre][+build])")
+                 f"(semver envelope: MAJOR.MINOR.PATCH[-pre][+build], digits-only core)")
 
     registry, source = npm_registry_url(package, args.npm_registry_url)
     if not registry:
@@ -823,7 +823,7 @@ def add_cargo_version(args, tool, versions_file, versions):
         sys.exit(f"error: {tool.get('name')} has an invalid crate in tool.json: {crate!r}")
     if not SEMVER_ENVELOPE_RE.match(args.version):
         sys.exit(f"error: version {args.version!r} does not match the cargo version envelope "
-                 f"(lowercase semver: MAJOR.MINOR.PATCH[-pre][+build])")
+                 f"(semver envelope: MAJOR.MINOR.PATCH[-pre][+build], digits-only core)")
 
     try:
         index, source = cargo_index_url(args.cargo_index_url)

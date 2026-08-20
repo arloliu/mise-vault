@@ -58,8 +58,8 @@
           "version": {
             "type": "string",
             "minLength": 1,
-            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9a-z.-]+)?(\\+[0-9a-z.-]+)?(?![\\s\\S])",
-            "description": "Lowercase semver envelope, shared verbatim by npm and cargo versions (both use the same grammar, so one branch covers both — see 'Implementation notes (Phase A)' in the design doc for why this schema uses anyOf rather than a duplicate identical branch per type). No checksum field for either type: none of these ecosystems supports an ad-hoc per-install content hash the way go's h1 does, so the approved-version list is the boundary, as it already is for a go record with no h1."
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?(?![\\s\\S])",
+            "description": "Semver envelope (digits-only core; letters of either case only in the prerelease/build segments), shared verbatim by npm and cargo versions (both use the same grammar, so one branch covers both — see 'Implementation notes (Phase A)' in the design doc for why this schema uses anyOf rather than a duplicate identical branch per type). No checksum field for either type: none of these ecosystems supports an ad-hoc per-install content hash the way go's h1 does, so the approved-version list is the boundary, as it already is for a go record with no h1."
           }
         }
       },

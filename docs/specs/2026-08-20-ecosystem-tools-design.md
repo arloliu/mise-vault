@@ -164,29 +164,34 @@ or version.
 
 `versions.json`: the same ordered array, entries carry a bare `version`
 only — **no checksum field for these types** (see section 6).
-Version grammars per ecosystem, all shell-safe and lowercase,
+Version grammars per ecosystem, all shell-safe,
 starting from the go version grammar and widening only where the
-ecosystem requires it (e.g. PEP 440 local segments use `+`).
+ecosystem requires it (e.g. PEP 440 local segments use `+`;
+npm/cargo prerelease and build segments allow uppercase).
 Concretely:
 
 - cargo and npm `version`:
-  `^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?(\+[0-9a-z.-]+)?\Z`
-  (a lowercase semver envelope —
+  `^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?\Z`
+  (a semver envelope with a digits-only core —
   it does not re-implement semver's leading-zero and
   empty-identifier rules; the registry probe does the real check).
 - pypi `version`:
   `^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?(\+[0-9a-z]+(\.[0-9a-z]+)*)?\Z`
   (an envelope for the common PEP 440 shapes;
   epochs and legacy version forms are deliberately not representable).
-Lowercase-only is deliberate and narrower than the ecosystems allow:
-npm and cargo prerelease segments may legally contain uppercase
-(e.g. `1.0.0-RC.1`), and such versions cannot be approved as-is.
-Approving a prerelease should be rare in this catalog;
-if one is ever required,
-widening the grammar is a small reviewed change
-(schema, validator, and fixtures move together),
-which is preferred over carrying a larger shell-facing alphabet
-from day one.
+The grammars started lowercase-only, deliberately narrower than the
+ecosystems allow, with widening reserved as a reviewed change.
+That widening has since been made for npm and cargo:
+their prerelease and build segments accept uppercase
+(e.g. `1.0.0-RC.1`), matching what those registries legally serve,
+while the core triple stays digits-only
+and every character remains shell-safe.
+pypi keeps its lowercase PEP 440 envelope on purpose —
+PEP 440 normalization lowercases pre-release markers,
+so the normalized form is the only one worth approving —
+and the go grammar is unchanged
+(an uppercase go version would need go-proxy escaping in the catalog
+tooling, which is not implemented).
 
 ## 4. Install semantics (hook branch per type)
 
@@ -531,7 +536,9 @@ All four questions are resolved;
 together with the decisions recorded inline
 (dependency-tree stance and selection guideline in section 6,
 runner-age failure guidance in section 4,
-lowercase-only version grammars in section 3),
+the version grammars in section 3 —
+lowercase-only then; npm/cargo prerelease and build segments
+have since been widened to accept uppercase),
 the spec has no open items and is ready for Phase A implementation.
 
 ## Implementation notes (Phase A, 2026-08-20)

@@ -90,12 +90,13 @@ BIN_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}\Z")
 # rules: a shell-safety envelope, not a full syntax validator (historic
 # uppercase crate names cannot be approved as-is).
 CRATE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}\Z")
-# Lowercase semver envelope shared by npm and cargo versions. Deliberately
-# does not enforce semver's leading-zero or empty-identifier rules, and
-# does not accept uppercase (npm/cargo prerelease segments may legally
-# contain uppercase, e.g. "1.0.0-RC.1", but such versions cannot be
-# approved as-is) — scripts/add-version's registry probe is the real check.
-SEMVER_ENVELOPE_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?(\+[0-9a-z.-]+)?\Z")
+# Semver envelope shared by npm and cargo versions: the core triple is
+# digits-only, letters of either case are accepted only inside the
+# prerelease and build segments (e.g. "1.0.0-RC.1"), and every character
+# is shell-safe. Deliberately does not enforce semver's leading-zero or
+# empty-identifier rules — scripts/add-version's registry probe is the
+# real check.
+SEMVER_ENVELOPE_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?\Z")
 # PEP 440 envelope for PyPI versions, covering the common shapes only;
 # epochs and legacy version forms are deliberately not representable.
 PEP440_ENVELOPE_RE = re.compile(
@@ -307,7 +308,7 @@ def builtin_validate_npm_version_rec(rec, where, path):
     v = rec.get("version")
     if not isinstance(v, str) or not SEMVER_ENVELOPE_RE.match(v):
         err(path, f"{where}: invalid npm tool version: {v!r} "
-                  f"(expected a lowercase semver envelope)")
+                  f"(expected a semver envelope: digits-only core, letters only in prerelease/build)")
 
 
 def builtin_validate_pypi_version_rec(rec, where, path):
@@ -327,7 +328,7 @@ def builtin_validate_cargo_version_rec(rec, where, path):
     v = rec.get("version")
     if not isinstance(v, str) or not SEMVER_ENVELOPE_RE.match(v):
         err(path, f"{where}: invalid cargo tool version: {v!r} "
-                  f"(expected a lowercase semver envelope)")
+                  f"(expected a semver envelope: digits-only core, letters only in prerelease/build)")
 
 
 def builtin_validate_versions(versions, path, tool_type=None):

@@ -42,29 +42,31 @@ FIXTURES = ROOT / "tests" / "fixtures" / "invalid-catalog"
 # grammar but is schema-catchable on its own already fails npm's identical
 # grammar too, and is covered by the npm cases above — so only the
 # cross-file dispatch on tool.json's declared type, not the schema's anyOf
-# across all shapes, catches any of these five.
+# across all shapes, catches any of these. go-version-uppercase and
+# pypi-version-uppercase-local joined that set when the npm/cargo semver
+# envelope started accepting uppercase prerelease/build identifiers:
+# their values now satisfy that OTHER shape's bare-version pattern, so
+# only the per-type dispatch rejects them.
 SCHEMA_CASES = ["artifact-traversal", "artifact-shell-metacharacters",
                 "artifact-missing-version", "bin-path-absolute",
                 "bin-path-traversal", "bad-sha256", "unknown-field",
                 "invalid-format", "go-module-shell-metacharacters",
                 "go-module-dot-segment", "go-module-uppercase",
                 "go-module-dot-edge", "go-version-v-prefix",
-                "go-version-uppercase", "go-module-trailing-newline",
+                "go-module-trailing-newline",
                 "npm-package-shell-metacharacters", "npm-package-uppercase",
                 "npm-package-trailing-newline", "npm-scope-missing-name",
                 "npm-scope-double-slash", "npm-at-inside-name",
                 "npm-package-too-long", "npm-bin-slash", "npm-bin-uppercase",
-                "npm-version-uppercase-prerelease",
                 "pypi-package-shell-metacharacters", "pypi-package-uppercase",
                 "pypi-package-trailing-newline", "pypi-package-non-normalized",
                 "pypi-package-double-hyphen", "pypi-bin-slash",
                 "pypi-bin-uppercase", "pypi-version-uppercase",
-                "pypi-version-uppercase-local",
                 "cargo-crate-uppercase", "cargo-crate-leading-digit",
                 "cargo-crate-shell-metacharacters",
                 "cargo-crate-trailing-newline", "cargo-crate-too-long",
                 "cargo-crate-slash"]
-MIN_CASES = 55
+MIN_CASES = 54
 
 s = Suite("run-validator-tests")
 

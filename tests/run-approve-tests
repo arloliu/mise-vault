@@ -497,7 +497,10 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
     # add-version itself, before any registry is contacted -- no mock
     # server needed for these) ---
     assert_add_version_rejected(
-        "npm version grammar: uppercase prerelease", "prettier", "3.9.6-RC.1", tmp,
+        "npm version grammar: letters in the core triple", "prettier", "3.A.6", tmp,
+        "does not match the npm version envelope")
+    assert_add_version_rejected(
+        "npm version grammar: shell metacharacter in prerelease", "prettier", "3.9.6-RC;1", tmp,
         "does not match the npm version envelope")
     assert_add_version_rejected(
         "pypi version grammar: hyphen not in the PEP 440 envelope", "ruff", "1.0.0-rc1", tmp,
@@ -526,6 +529,15 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
         assert_add_version_rejected(
             "npm probe: version not in registry doc", "prettier", "9.9.9", tmp,
             "version not listed in the npm registry package document",
+            extra_argv=["--npm-registry-url", registry])
+
+    # uppercase prerelease and build identifiers are legal npm/cargo
+    # version shapes: the envelope accepts them and the registry probe is
+    # what decides, exactly as for any lowercase version
+    with fixed_response_server(18466, '{"versions": {"3.9.6-RC.1": {}}}') as registry:
+        assert_add_version_accepted(
+            "npm probe: uppercase prerelease passes the envelope, judged by the probe",
+            "prettier", "3.9.6-RC.1", tmp,
             extra_argv=["--npm-registry-url", registry])
 
     with fixed_response_server(
@@ -636,7 +648,7 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
     # add-version itself, before any registry is contacted -- no mock
     # server needed) ---
     assert_add_version_rejected(
-        "cargo version grammar: uppercase prerelease", "tokei", "14.0.0-RC.1", tmp,
+        "cargo version grammar: letters in the core triple", "tokei", "14.B.0", tmp,
         "does not match the cargo version envelope")
 
     # --- add-version: a git-index registry is refused by name, without
@@ -676,6 +688,14 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
             content_type="text/plain") as index:
         assert_add_version_accepted(
             "cargo probe: sparse+ prefix stripped, version found", "tokei", "9.9.6", tmp,
+            extra_argv=["--cargo-index-url", f"sparse+{index}"])
+
+    with fixed_response_server(
+            18476, '{"name":"tokei","vers":"14.0.0-RC.1","yanked":false}\n',
+            content_type="text/plain") as index:
+        assert_add_version_accepted(
+            "cargo probe: uppercase prerelease passes the envelope, judged by the probe",
+            "tokei", "14.0.0-RC.1", tmp,
             extra_argv=["--cargo-index-url", f"sparse+{index}"])
 
     log = str(Path(tmp) / "cargo-redirect.log")
