@@ -1,0 +1,6 @@
+{
+  "name": "evil",
+  "type": "npm",
+  "package": "evil",
+  "bin": "foo/bar"
+}

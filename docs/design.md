@@ -2,7 +2,8 @@
 
 Status: living document.
 This started as the initial design proposal and has been amended
-after the research and proof-of-concept phases (2026-08-18).
+after the research and proof-of-concept phases (2026-08-18),
+then again after Phase A of the ecosystem tool types landed (2026-08-20).
 Evidence and the numbered decision log live in [research/SYNTHESIS.md](research/SYNTHESIS.md);
 this document states the resulting rules in plain language.
 
@@ -55,6 +56,24 @@ this document states the resulting rules in plain language.
    "checksum verification is never optional" rule, justified because the
    go proxy is company infrastructure the plugin itself addresses, and the
    approved-version list is still the actual gate on what installs.
+10. **Two more tool types exist: npm and pypi (Phase A of the ecosystem
+    tool types; see the "Ecosystem-Installed Tools" worked example
+    later in this document).**
+    They install through the ecosystem's own package manager
+    (npm; pipx by default or uv opt-in) rather than through Nexus or a
+    plugin-controlled proxy, reading whatever registry the user's own
+    environment already configures.
+    This is a scoped, deliberate revision of the "no public internet
+    after bootstrap" principle: it applies only to these two types,
+    and it leaves the rule exactly as absolute as before for artifact
+    and go-installed tools.
+    They are version-pin-only — no checksum field exists for either
+    type, so the approved-version list is their entire security
+    boundary, the same role it already plays for an `h1`-less go
+    record.
+    Routing is unchanged (`vault:<tool>`, package name in `tool.json`).
+    cargo (Phase B) and a bun runner (Phase C) are planned to follow
+    the same pattern.
 
 ## 1. Overview
 
@@ -66,9 +85,11 @@ The system must operate entirely using private infrastructure:
 - **Private Nexus** for immutable prebuilt binaries and archives.
 - **mise** for client-side tool version management and activation.
 
-After bootstrap, no access to public services should be required.
+After bootstrap, no access to public services should be required
+for artifact and go-installed tools — the plugin builds every URL
+itself, from Nexus or the plugin-controlled go proxy.
 
-In particular, normal operation must not depend on:
+In particular, normal operation of those tool types must not depend on:
 
 - GitHub
 - GitLab.com
@@ -80,6 +101,16 @@ In particular, normal operation must not depend on:
 - Aqua's public registry
 - Public release APIs
 - Other Internet services
+
+npm and pypi tool types (added in Phase A of the ecosystem tool types,
+section 14.5) are a scoped, deliberate exception to this list:
+they install through the ecosystem's own package manager, which reads
+whatever registry — crates.io, PyPI, npm, or a private mirror of any of
+them — the user's own environment already configures.
+The plugin constructs no registry URL of its own for these types at all,
+so egress there is a network-policy and user-configuration matter,
+not something the plugin can enforce; see section 14.5 for the full
+rationale and section 30 for how this changes the PoC success criteria.
 
 The desired developer experience is intentionally conventional:
 
@@ -126,6 +157,16 @@ Developers should not need to understand or configure:
 
 Those are platform concerns and belong in `mise-vault`.
 
+One caveat, added by Phase A of the ecosystem tool types (section 14.5):
+a developer who wants an npm or pypi tool DOES need their own npm/pip/uv
+registry configuration pointed at a reachable registry
+(usually already set up for their other ecosystem work).
+The plugin still hides the installation mechanism —
+which command runs, where the binary lands, which noise-suppression
+variables are set — but registry reachability is the same prerequisite
+that ordinary `npm install` or `pip install` already has,
+and this plugin does not remove it for these two types.
+
 ---
 
 # 2. Goals
@@ -155,7 +196,21 @@ mise use <tool>@<version>
 mise outdated
 ```
 
-There must be no automatic fallback to public package registries or release APIs.
+for artifact and go-installed tools — the plugin builds every URL itself
+for those, and the diagram above is the complete dependency set.
+There must be no automatic fallback to public package registries or
+release APIs for these types.
+
+npm and pypi tools (section 14.5) are the deliberate exception:
+`mise install <tool>@<version>` for those runs the ecosystem's own
+package manager against whatever registry the user's own environment
+configures, so the third arrow in the diagram above is theirs to draw,
+not the plugin's — reachability there depends on where that registry
+points, exactly as it would for an unmanaged `npm install` or
+`pip install`.
+`mise ls-remote <tool>` never depends on any of this, for any tool type:
+version listing always reads the local catalog checkout, never a
+network call.
 
 ---
 
@@ -1001,6 +1056,75 @@ branch per ecosystem, never per-tool code.
 
 ---
 
+## 14.5 Ecosystem-Installed Tools (npm, pypi)
+
+prettier (npm) and ruff (pypi) are the Phase A examples.
+Like a go-installed tool, there is no artifact to download and no
+`platforms` entry in `tool.json` — just the package name the ecosystem
+already knows it by:
+
+```json
+{ "name": "prettier", "type": "npm", "package": "prettier" }
+{ "name": "ruff", "type": "pypi", "package": "ruff" }
+```
+
+`versions.json` carries a bare version and, deliberately, no checksum
+field at all: neither ecosystem supports an ad-hoc per-install content
+hash the way go's `h1` does, so these types are version-pin-only by
+design, and the approved-version list is the entire security boundary
+for them, exactly as it already is for an `h1`-less go record.
+
+The load-bearing difference from every other tool type is the network
+model.
+A go-installed tool still resolves through a proxy the plugin
+constructs and controls (the GOPROXY ladder, section 14.4).
+An npm or pypi tool installs through a runner selected by an
+environment variable (`MISE_VAULT_NPM_RUNNER`, `MISE_VAULT_PYPI_RUNNER`
+— pipx is the pypi default; npm is the npm default) that reads its
+registry from the user's own environment: `.npmrc` for npm,
+`pip.conf` for pipx (it installs through pip), `uv.toml` or
+`UV_DEFAULT_INDEX`/`UV_INSECURE_HOST` for the opt-in uv runner.
+The plugin sets only placement (where the binary lands), the version
+pin, and a small table of noise-suppression and
+toolchain-download-refusal environment variables — it never sets a
+registry URL, an index URL, or any auth for these types.
+That is the scoped exception to the "no public internet, no fallback"
+principle stated in sections 1 and 2.1: for these two types, the
+network boundary is enforced by the same mechanism that already
+enforces it for a developer's own `npm install` or `pip install` —
+network policy (the forward proxy) and the user's own registry
+configuration — not by the plugin constructing a URL.
+Toolchains themselves (node/npm, python/pip/pipx/uv) are the user's
+responsibility too, the same way go's own toolchain already was;
+the plugin only requires the selected runner to be on `PATH` and fails
+closed, naming the fix, when it is not.
+
+Installation (npm shown; pypi via pipx or uv follows the same shape):
+
+```text
+version approved?
+-> selected runner on PATH? (else fail closed, naming the fix)
+-> npm install -g --prefix <install_path> <package>@<version>
+   (noise-suppression variables pinned; registry read from .npmrc)
+-> expected binary exists at <install_path>/bin/<bin-or-name>?
+   (else fail closed — likely cause: a runner too old to honor
+   the placement controls)
+```
+
+The environment then exposes just:
+
+```text
+PATH=<install_path>/bin
+```
+
+Full field grammars, the per-runner environment-variable table, the
+registry-probe conventions `scripts/add-version` uses, and the
+rollout phases (npm+pypi now, cargo and the bun runner later) are
+authoritative in `docs/specs/2026-08-20-ecosystem-tools-design.md`;
+this section states the resulting shape, not the detail.
+
+---
+
 # 15. Bootstrap Installer
 
 The repository contains an `install.sh`.
@@ -1267,6 +1391,15 @@ The backend must continue to function using only:
 Private GitLab
 Private Nexus
 ```
+
+for artifact and go-installed tools.
+npm and pypi tools join this gate once their registry configuration
+points at Nexus proxy repositories (`npm-proxy`, `pypi-proxy`) with a
+warmed cache — still "only Private Nexus" in this test topology, but
+worth stating explicitly: the plugin itself does not guarantee that
+production points these types at Nexus rather than a real registry,
+it only refuses to override wherever the user's environment already
+points them (section 14.5).
 
 This should eventually become a required release gate.
 
@@ -1624,6 +1757,22 @@ The project is ready to proceed beyond PoC when all of the following are true:
 - Existing `.tool-versions` compatibility is understood.
 - CI validates catalog metadata and artifacts.
 - Adding a tool version requires only a small, reviewable catalog change.
+
+This list describes the original PoC's three tools (go, golangci-lint,
+glab), all artifact or go-installed — "Tool artifacts come only from
+private Nexus", "SHA-256 verification is mandatory", "Public Internet
+access can be completely disabled", and "No public fallback occurs"
+hold exactly as written for those types, unchanged.
+npm and pypi tool types (section 14.5, Phase A, landed after this PoC)
+carry a different, later-documented network model:
+they are version-pin-only (no checksum field exists for them) and they
+install through the user's own ecosystem registry configuration rather
+than only from Nexus, so "Public Internet access can be completely
+disabled" for them depends on where that registry points, and "no
+public fallback" means no SILENT fallback to a different registry than
+the one the user configured — not that no ecosystem registry is ever
+reached.
+See section 14.5 for the full rationale.
 
 ---
 

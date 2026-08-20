@@ -163,6 +163,165 @@ function M.check_module_path(module, label)
     return module
 end
 
+--- Validate an npm package name before it reaches a shell command: an
+--- optional "@scope/" prefix, then lowercase [a-z0-9._-] segments, capped
+--- at npm's own 214-character limit.
+--- The "/" is the only path separator allowed anywhere in the value,
+--- and only as the single scope separator.
+--- This is defense in depth: the catalog validator already enforces the
+--- same rule, but a runtime check never trusts a file on disk blindly.
+--- Deliberately narrower than npm's own rules (a shell-safety envelope,
+--- not a full syntax validator): a value can match here and still not
+--- exist in the registry — scripts/add-version probes for that.
+function M.check_npm_package(package, label)
+    if type(package) ~= "string" or package == "" or #package > 214 then
+        error(label .. " is not a valid npm package name: " .. tostring(package))
+    end
+    local name = package
+    if package:sub(1, 1) == "@" then
+        local slash = package:find("/", 1, true)
+        if slash == nil then
+            error(label .. " is not a valid npm package name (a scoped name needs " ..
+                  "/name after @scope): " .. package)
+        end
+        local scope = package:sub(2, slash - 1)
+        if scope == "" or scope:match("^[%l%d][%l%d%._%-]*$") == nil then
+            error(label .. " has an invalid npm scope: " .. package)
+        end
+        if package:find("/", slash + 1, true) ~= nil then
+            error(label .. " has more than one / (only the scope separator is allowed): " ..
+                  package)
+        end
+        name = package:sub(slash + 1)
+    end
+    if name == "" or name:match("^[%l%d][%l%d%._%-]*$") == nil then
+        error(label .. " is not a valid npm package name: " .. tostring(package))
+    end
+    return package
+end
+
+--- Validate a PyPI package name before it reaches a shell command: the
+--- PEP 503 normalized form only (lowercase letters, digits, and single
+--- hyphens between segments; no leading, trailing, or doubled hyphen).
+--- The catalog stores only the normalized form; scripts/add-version
+--- refuses a non-normalized input instead of silently rewriting it.
+function M.check_pypi_package(package, label)
+    if type(package) ~= "string" or package == ""
+        or package:match("^[%l%d%-]+$") == nil
+        or package:sub(1, 1) == "-" or package:sub(-1) == "-"
+        or package:find("--", 1, true) ~= nil then
+        error(label .. " is not a valid PyPI package name (expected the PEP 503 " ..
+              "normalized form): " .. tostring(package))
+    end
+    return package
+end
+
+--- Validate the optional "bin" field shared by npm/pypi (and cargo, later):
+--- the executable name the plugin looks for after install and exposes on
+--- PATH. It becomes part of a filesystem path, so the grammar is narrow
+--- and shell-safe, and capped at 64 characters.
+function M.check_bin_name(bin, label)
+    if type(bin) ~= "string" or bin == "" or #bin > 64
+        or bin:match("^[%l%d][%l%d%._%-]*$") == nil then
+        error(label .. " is not a valid binary name: " .. tostring(bin))
+    end
+    return bin
+end
+
+--- Lowercase semver envelope shared by npm and cargo versions
+--- ("major.minor.patch" plus optional "-prerelease" and "+build" parts).
+--- This is an envelope, not a semver implementation: it does not enforce
+--- semver's leading-zero or empty-identifier rules, and it does not accept
+--- uppercase (npm/cargo prerelease segments may legally contain uppercase,
+--- e.g. "1.0.0-RC.1", but such versions cannot be approved as-is — widening
+--- this is a small reviewed change). scripts/add-version's registry probe
+--- is the real semantic check.
+function M.check_semver_envelope(version, label)
+    if type(version) ~= "string" or version == "" then
+        error(label .. " is not a valid version: " .. tostring(version))
+    end
+    local rest = version:match("^%d+%.%d+%.%d+(.*)$")
+    if rest == nil then
+        error(label .. " is not a valid version (expected a lowercase " ..
+              "major.minor.patch envelope): " .. version)
+    end
+    if rest ~= "" then
+        local ok = false
+        if rest:match("^%-[%l%d%.%-]+%+[%l%d%.%-]+$") ~= nil then
+            ok = true
+        elseif rest:match("^%-[%l%d%.%-]+$") ~= nil then
+            ok = true
+        elseif rest:match("^%+[%l%d%.%-]+$") ~= nil then
+            ok = true
+        end
+        if not ok then
+            error(label .. " is not a valid version (expected a lowercase " ..
+                  "major.minor.patch envelope): " .. version)
+        end
+    end
+    return version
+end
+
+--- PEP 440 envelope for PyPI versions, covering the common shapes only
+--- (epochs and legacy version forms are deliberately not representable).
+--- Consumes the string piece by piece — release segments, then an optional
+--- pre-release (a/b/rc), post-release, dev-release, and local version —
+--- and errors if anything is left over, to the same effect as the anchored
+--- regex used in the schemas and scripts/validate-catalog.
+function M.check_pep440_envelope(version, label)
+    if type(version) ~= "string" or version == "" then
+        error(label .. " is not a valid PyPI version: " .. tostring(version))
+    end
+    local fail = function()
+        error(label .. " is not a valid PyPI version (expected a PEP 440 envelope): " .. version)
+    end
+    local s = version
+    local rel = s:match("^%d+")
+    if rel == nil then
+        fail()
+    end
+    s = s:sub(#rel + 1)
+    while true do
+        local seg = s:match("^%.%d+")
+        if seg == nil then
+            break
+        end
+        s = s:sub(#seg + 1)
+    end
+    local pre = s:match("^a%d+") or s:match("^b%d+") or s:match("^rc%d+")
+    if pre ~= nil then
+        s = s:sub(#pre + 1)
+    end
+    local post = s:match("^%.post%d+")
+    if post ~= nil then
+        s = s:sub(#post + 1)
+    end
+    local dev = s:match("^%.dev%d+")
+    if dev ~= nil then
+        s = s:sub(#dev + 1)
+    end
+    if s:sub(1, 1) == "+" then
+        local rest = s:sub(2)
+        local seg = rest:match("^[%l%d]+")
+        if seg == nil then
+            fail()
+        end
+        rest = rest:sub(#seg + 1)
+        while true do
+            local nxt = rest:match("^%.[%l%d]+")
+            if nxt == nil then
+                break
+            end
+            rest = rest:sub(#nxt + 1)
+        end
+        s = rest
+    end
+    if s ~= "" then
+        fail()
+    end
+    return version
+end
+
 --- Substitute {version} / {install_path} placeholders.
 function M.render(template, vars)
     local out = template

@@ -89,6 +89,71 @@
           "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
         }
       }
+    },
+    {
+      "title": "package installed via the npm ecosystem's package manager",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "package"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*(?![\\s\\S])",
+          "description": "Tool name; must equal the catalog directory name"
+        },
+        "type": {
+          "const": "npm",
+          "description": "Installed by running 'npm install -g' (or the runner selected by MISE_VAULT_NPM_RUNNER) against the user's own npm registry configuration; the toolchain and its network path are the user's responsibility, not the plugin's"
+        },
+        "package": {
+          "type": "string",
+          "maxLength": 214,
+          "pattern": "^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(?![\\s\\S])",
+          "description": "npm package name, optionally scoped (@scope/name); the / is the only path separator allowed anywhere in the value. Lowercase only and narrower than npm's own rules: a shell-safety envelope, not a full syntax validator — a value can match here and still not exist in the registry"
+        },
+        "bin": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}(?![\\s\\S])",
+          "description": "Executable name the plugin verifies exists after install and exposes on PATH; defaults to the tool name when absent. An expectation, not an instruction: the installer decides what it writes, the plugin never renames anything"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
+        }
+      }
+    },
+    {
+      "title": "package installed via the PyPI ecosystem's package manager",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "package"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*(?![\\s\\S])",
+          "description": "Tool name; must equal the catalog directory name"
+        },
+        "type": {
+          "const": "pypi",
+          "description": "Installed by running 'pipx install' (default) or 'uv tool install' (MISE_VAULT_PYPI_RUNNER=uv) against the user's own PyPI index configuration; the toolchain and its network path are the user's responsibility, not the plugin's"
+        },
+        "package": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(?![\\s\\S])",
+          "description": "PEP 503 normalized PyPI package name. The catalog stores only the normalized form; scripts/add-version refuses a non-normalized input and names the normalized form to use, instead of silently rewriting it"
+        },
+        "bin": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}(?![\\s\\S])",
+          "description": "Executable name the plugin verifies exists after install and exposes on PATH; defaults to the tool name when absent (a PyPI project's console-script name may differ from its project name, e.g. httpie installs http)"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
+        }
+      }
     }
   ]
 }

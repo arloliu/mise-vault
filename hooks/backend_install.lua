@@ -3,8 +3,15 @@
 ---     download (curl -n) -> mandatory SHA-256 verification -> extract -> install_path.
 ---   go tools: catalog lookup -> "go install <module>@v<version>" against the
 ---     plugin-controlled go proxy, with an optional module checksum check first.
---- Fail-closed: any miss or mismatch aborts with a specific error;
---- there is no fallback to public services, ever.
+---   npm/pypi tools: catalog lookup -> the selected runner (npm; pipx or uv) installs
+---     the pinned package version straight into install_path/bin, reading whatever
+---     registry/proxy/auth configuration the user's own environment already has —
+---     the plugin does not construct or control that network path the way it does
+---     for artifact and go installs (see docs/specs/2026-08-20-ecosystem-tools-design.md).
+--- Fail-closed: any miss or mismatch aborts with a specific error.
+--- The artifact and go install paths never fall back to a public service.
+--- npm/pypi installs intentionally inherit the user's own ecosystem registry
+--- configuration, a deliberate, scoped exception to that rule (see the design doc above).
 
 --- Install a tool built with "go install". Runs before the platform lookup:
 --- go tools carry no platforms entry at all, they run wherever an approved
@@ -218,6 +225,233 @@ local function install_go_tool(ctx, tool, vrec, common, cmd, strings, json)
     return {}
 end
 
+--- Toolchains are the user's responsibility for the ecosystem types (npm,
+--- pypi, and later cargo): the plugin only requires the selected runner to
+--- exist on PATH, never installs or version-gates it, and never falls back
+--- silently from one runner to another.
+--- MISE_VAULT_NPM_RUNNER: "npm" (default) or "bun". "bun" is recognized but
+--- rejected with its own message until the bun runner ships (Phase C) — a
+--- distinct error from an unrecognized value.
+local function npm_runner_choice()
+    local r = os.getenv("MISE_VAULT_NPM_RUNNER")
+    if r == nil or r == "" then
+        return "npm"
+    end
+    if r == "npm" then
+        return "npm"
+    end
+    if r == "bun" then
+        error("MISE_VAULT_NPM_RUNNER=bun: the bun runner is not yet supported")
+    end
+    error("MISE_VAULT_NPM_RUNNER has an unknown value: " .. r .. " (expected npm or bun)")
+end
+
+--- MISE_VAULT_PYPI_RUNNER: "pipx" (default) or "uv".
+local function pypi_runner_choice()
+    local r = os.getenv("MISE_VAULT_PYPI_RUNNER")
+    if r == nil or r == "" then
+        return "pipx"
+    end
+    if r == "pipx" or r == "uv" then
+        return r
+    end
+    error("MISE_VAULT_PYPI_RUNNER has an unknown value: " .. r .. " (expected pipx or uv)")
+end
+
+--- The runner existence check runs first and its error message names the fix.
+--- mise strips its own managed tool paths from PATH while a hook runs (see
+--- the AGENTS.md lesson), but these runners are user-installed, not
+--- mise-managed, so a plain PATH lookup is correct here — the one exception
+--- is a runner the user installed VIA mise, which will not be visible; the
+--- error message says so rather than pretending the plugin can find it.
+local function require_runner(bin_name, cmd, strings, common)
+    -- bin_name is always one of this file's own literal runner names
+    -- ("npm", "pipx", "uv"), never catalog or environment data, but every
+    -- interpolated value is shell-quoted anyway, the same defense in depth
+    -- every other command in this file uses.
+    local out = cmd.exec("command -v " .. common.shell_quote(bin_name) .. " 2>&1 || true")
+    if strings.trim_space(out) == "" then
+        error(bin_name .. " was not found on PATH — install it and ensure it is on PATH, " ..
+              "then retry (note: mise strips its own managed tool paths from PATH while " ..
+              "this hook runs, so a " .. bin_name .. " installed via 'mise use' will not " ..
+              "be visible here even though it is installed)")
+    end
+end
+
+--- Shared abort message for both npm and pypi runners when a zero exit
+--- status still produced no expected binary: the most likely cause is a
+--- runner too old to honor the install-location settings, which silently
+--- installs into the user's real environment instead of install_path.
+local function missing_bin_error(runner, bin_name, bin_dir)
+    return runner .. " reported success but produced no " .. bin_name .. " binary in " ..
+        bin_dir .. " — the " .. runner .. " runner may be too old to honor the " ..
+        "install-location settings; check its version"
+end
+
+--- Install a tool published to the npm registry, via the runner selected by
+--- MISE_VAULT_NPM_RUNNER (npm by default). linux/darwin only: npm on Windows
+--- places global executables directly in the prefix rather than in
+--- <prefix>/bin, and this plugin carries no per-platform catalog data for
+--- these types that could encode such a difference, so unsupported
+--- platforms fail closed here instead of silently landing in the wrong place.
+local function install_npm_tool(ctx, tool, vrec, common, cmd, strings)
+    local file = require("file")
+    local q = common.shell_quote
+
+    if RUNTIME.osType ~= "linux" and RUNTIME.osType ~= "darwin" then
+        error(ctx.tool .. " is an npm-installed tool, which is only supported on linux " ..
+              "and darwin (this platform reports " .. RUNTIME.osType .. ")")
+    end
+
+    -- Defense in depth: the catalog validator already enforces these
+    -- grammars, so a hand-edited or compromised file on disk can never
+    -- reach a shell command unvalidated, the same as the go module path.
+    common.check_npm_package(tool.package, "package")
+    common.check_semver_envelope(ctx.version, "version")
+    local bin_name = tool.bin or ctx.tool
+    common.check_bin_name(bin_name, "bin")
+
+    local runner = npm_runner_choice()
+    require_runner(runner, cmd, strings, common)
+
+    -- Unlike the go branch, npm writes only under install_path (via
+    -- --prefix below); nothing is cached under ctx.download_path, so
+    -- there is no equivalent leftover-cache directory to clear here.
+    -- A stale bin_dir/bin_name from a prior failed attempt at the same
+    -- install_path would still satisfy the post-install existence check
+    -- below, exactly the same residual exposure install_go_tool already
+    -- carries for its own binary output.
+    local bin_dir = file.join_path(ctx.install_path, "bin")
+    -- Pure noise suppression, not policy: audit endpoints are typically
+    -- absent on private registry proxies, so the audit call is noise at
+    -- best and an error at worst.
+    local npm_env = "NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false " ..
+        "NPM_CONFIG_AUDIT=false"
+
+    -- Display only, never validated: helps diagnose which registry an
+    -- install actually reached, without altering or trusting the value.
+    local registry = strings.trim_space(cmd.exec(
+        npm_env .. " npm config get registry 2>&1 || true"))
+    print("mise-vault: installing " .. tool.package .. "@" .. ctx.version ..
+          " via npm (registry: " .. registry .. ")")
+
+    -- Success is judged by an unconditional numeric exit-status trailer
+    -- printed as the very last line, never a fixed success word: install
+    -- output is attacker-influenced text (a failing postinstall script can
+    -- print anything), and only the final trailer line is read.
+    -- mise's cmd.exec shell aborts on the first unguarded nonzero status,
+    -- so every step here is guarded.
+    local out = cmd.exec(
+        "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. npm_env ..
+        " npm install -g --prefix " .. q(ctx.install_path) .. " " ..
+        q(tool.package .. "@" .. ctx.version) .. " 2>&1 || st=$?; } && echo \"NPMINSTALL_EXIT=$st\"")
+    local status = out:match("NPMINSTALL_EXIT=(%d+)%s*$")
+    if status ~= "0" then
+        local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
+        error("npm install failed for " .. ctx.tool .. " " .. ctx.version ..
+              (detail ~= "" and (": " .. detail) or ""))
+    end
+
+    local bin_path = file.join_path(bin_dir, bin_name)
+    if not file.exists(bin_path) then
+        error(missing_bin_error("npm", bin_name, bin_dir))
+    end
+
+    return {}
+end
+
+--- Install a tool published to PyPI, via the runner selected by
+--- MISE_VAULT_PYPI_RUNNER (pipx by default, uv opt-in). linux/darwin only,
+--- for the same reason as the npm branch above.
+local function install_pypi_tool(ctx, tool, vrec, common, cmd, strings)
+    local file = require("file")
+    local q = common.shell_quote
+
+    if RUNTIME.osType ~= "linux" and RUNTIME.osType ~= "darwin" then
+        error(ctx.tool .. " is a pypi-installed tool, which is only supported on linux " ..
+              "and darwin (this platform reports " .. RUNTIME.osType .. ")")
+    end
+
+    common.check_pypi_package(tool.package, "package")
+    common.check_pep440_envelope(ctx.version, "version")
+    local bin_name = tool.bin or ctx.tool
+    common.check_bin_name(bin_name, "bin")
+
+    local runner = pypi_runner_choice()
+    require_runner(runner, cmd, strings, common)
+
+    -- Same reasoning as the npm branch above: pipx and uv write only under
+    -- install_path (PIPX_HOME/PIPX_BIN_DIR or UV_TOOL_DIR/UV_TOOL_BIN_DIR
+    -- below), nothing is cached under ctx.download_path, so there is no
+    -- equivalent leftover-cache directory to clear here.
+    local bin_dir = file.join_path(ctx.install_path, "bin")
+    local spec = q(tool.package .. "==" .. ctx.version)
+    local out
+
+    if runner == "pipx" then
+        -- PIPX_HOME/PIPX_BIN_DIR/PIPX_MAN_DIR/PIPX_COMPLETION_DIR: pipx's
+        -- defaults point into the user's home directory, so a package
+        -- shipping man pages or shell completions would otherwise leave
+        -- files behind after mise removes the installation.
+        -- PIPX_DEFAULT_BACKEND=pip: pipx 1.12+ auto-selects a uv backend
+        -- when uv is on PATH, which would route the install through uv's
+        -- registry configuration instead of pip's; the pin keeps the
+        -- documented pip.conf channel true regardless of what else is
+        -- installed.
+        -- PIPX_FETCH_PYTHON=never: stops pipx from downloading a standalone
+        -- Python interpreter by itself, which is the user's job.
+        local pipx_env = "PIPX_HOME=" .. q(file.join_path(ctx.install_path, "pipx")) ..
+            " PIPX_BIN_DIR=" .. q(bin_dir) ..
+            " PIPX_MAN_DIR=" .. q(file.join_path(ctx.install_path, "share", "man")) ..
+            " PIPX_COMPLETION_DIR=" .. q(file.join_path(ctx.install_path, "share")) ..
+            " PIPX_DEFAULT_BACKEND=pip PIPX_FETCH_PYTHON=never PIP_DISABLE_PIP_VERSION_CHECK=1"
+        -- pipx has no equivalent of "npm config get registry" to report
+        -- (it installs through pip, reading pip.conf); printing nothing is
+        -- better than printing something wrong.
+        print("mise-vault: installing " .. tool.package .. "==" .. ctx.version .. " via pipx")
+        out = cmd.exec(
+            "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. pipx_env ..
+            " pipx install " .. spec .. " 2>&1 || st=$?; } && echo \"PIPXINSTALL_EXIT=$st\"")
+        local status = out:match("PIPXINSTALL_EXIT=(%d+)%s*$")
+        if status ~= "0" then
+            local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
+            error("pipx install failed for " .. ctx.tool .. " " .. ctx.version ..
+                  (detail ~= "" and (": " .. detail) or ""))
+        end
+    else
+        -- UV_TOOL_DIR/UV_TOOL_BIN_DIR: uv is a managed-environment
+        -- installer, the binary in bin is a launcher into UV_TOOL_DIR, so
+        -- both directories must live under install_path for uninstall to
+        -- stay clean.
+        -- UV_PYTHON_DOWNLOADS=never: stops uv from downloading a managed
+        -- Python interpreter by itself, which is the user's job.
+        -- uv reads none of pip's configuration; the user's own uv.toml (or
+        -- UV_DEFAULT_INDEX / UV_INSECURE_HOST) is what points it at a
+        -- registry — the plugin never sets that.
+        local uv_env = "UV_TOOL_DIR=" .. q(file.join_path(ctx.install_path, "tools")) ..
+            " UV_TOOL_BIN_DIR=" .. q(bin_dir) .. " UV_PYTHON_DOWNLOADS=never"
+        -- uv likewise has no natural place to report an effective registry
+        -- for this command; print nothing rather than something wrong.
+        print("mise-vault: installing " .. tool.package .. "==" .. ctx.version .. " via uv")
+        out = cmd.exec(
+            "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. uv_env ..
+            " uv tool install " .. spec .. " 2>&1 || st=$?; } && echo \"UVINSTALL_EXIT=$st\"")
+        local status = out:match("UVINSTALL_EXIT=(%d+)%s*$")
+        if status ~= "0" then
+            local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
+            error("uv tool install failed for " .. ctx.tool .. " " .. ctx.version ..
+                  (detail ~= "" and (": " .. detail) or ""))
+        end
+    end
+
+    local bin_path = file.join_path(bin_dir, bin_name)
+    if not file.exists(bin_path) then
+        error(missing_bin_error(runner, bin_name, bin_dir))
+    end
+
+    return {}
+end
+
 function PLUGIN:BackendInstall(ctx)
     local common = require("lib/common")
     local file = require("file")
@@ -237,6 +471,12 @@ function PLUGIN:BackendInstall(ctx)
 
     if tool.type == "go" then
         return install_go_tool(ctx, tool, vrec, common, cmd, strings, json)
+    end
+    if tool.type == "npm" then
+        return install_npm_tool(ctx, tool, vrec, common, cmd, strings)
+    end
+    if tool.type == "pypi" then
+        return install_pypi_tool(ctx, tool, vrec, common, cmd, strings)
     end
 
     local platform = common.platform()

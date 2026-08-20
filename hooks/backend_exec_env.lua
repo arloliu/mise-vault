@@ -8,10 +8,12 @@ function PLUGIN:BackendExecEnv(ctx)
 
     local env_vars = {}
 
-    if tool.type == "go" then
-        -- go tools carry no platforms entry: the binary always lands in
-        -- install_path/bin (see hooks/backend_install.lua), on every platform
-        -- that already has an approved go toolchain.
+    -- Types built by their own ecosystem's installer rather than unpacked
+    -- from a Nexus artifact; the binary always lands in install_path/bin
+    -- (see hooks/backend_install.lua). cargo joins this set in a later phase.
+    local SOURCE_BUILT_TYPES = { go = true, npm = true, pypi = true }
+
+    if SOURCE_BUILT_TYPES[tool.type] then
         table.insert(env_vars, { key = "PATH", value = file.join_path(ctx.install_path, "bin") })
     else
         local platform = common.platform()

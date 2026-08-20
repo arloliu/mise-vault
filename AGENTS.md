@@ -13,6 +13,16 @@ that distributes centrally approved developer tools inside an isolated enterpris
   they never see Nexus URLs, archive layouts, checksums, or backend names.
 - After a one-time bootstrap, normal operation needs **no public internet access**
   and must never fall back to GitHub, public registries, or upstream release APIs.
+  Artifact and go-installed tools carry this guarantee absolutely:
+  the plugin builds every download URL itself, from Nexus or the
+  plugin-controlled go proxy, and constructs no other URL.
+  npm and pypi tool types are a scoped, deliberate exception:
+  the plugin constructs no registry URL of its own for them at all —
+  they install through the ecosystem's own package manager,
+  which reads whatever registry, proxy, and auth configuration
+  the user's own environment already has,
+  and egress there is enforced by the network, not by the plugin
+  (see "Decisions that bind the implementation" below).
 
 The catalog is the security boundary:
 an artifact existing in Nexus does not make it installable —
@@ -25,7 +35,8 @@ only a version listed in `catalog/<tool>/versions.json` is approved.
 metadata.lua            plugin identity (backend plugin name: vault)
 hooks/                  the three mise backend hooks (list versions, install, exec env)
 lib/common.lua          shared helpers: catalog loading, platform id, URL building
-catalog/<tool>/         tool.json (packaging) + versions.json (approved versions + sha256)
+catalog/<tool>/         tool.json (packaging) + versions.json (approved versions;
+                        sha256 for artifact tools, no checksum field for npm/pypi)
 config/defaults.json    default Nexus base URL
 schemas/                JSON Schemas for the two catalog file types
 scripts/                catalog tooling: approve, add-version, validate-catalog, verify-artifacts, vault-sync
@@ -52,10 +63,15 @@ tmp/                    scratch area, not part of the deliverable
   each aborts with a specific error message.
   Never add a fallback to a public service,
   and never make artifact SHA-256 verification optional.
-  The one deliberate exception: a go-tool version record may omit its `h1`
-  module checksum (an explicit proxy-trust entry, requiring `--no-h1` at
-  approval time) — but a recorded `h1` is always enforced,
-  and the approved-version list still gates every install.
+  Two deliberate exceptions exist, both bounded by the approved-version list.
+  A go-tool version record may omit its `h1` module checksum
+  (an explicit proxy-trust entry, requiring `--no-h1` at approval time) —
+  but a recorded `h1` is always enforced.
+  npm and pypi tool types are version-pin-only by design:
+  neither ecosystem supports an ad-hoc per-install content hash
+  the way go's `h1` does, so no checksum field exists for them at all,
+  and there is nothing to make optional.
+  In every case the approved-version list still gates every install.
 - **Data over code.**
   Adding a normal tool means adding `catalog/<tool>/tool.json` and `versions.json`,
   not writing tool-specific Lua.
@@ -172,7 +188,12 @@ The operative rules:
   network egress policy, not the plugin, is what makes that unreachable in production.
 - **`MISE_OFFLINE=1` does not block this plugin's downloads**
   (they run through `cmd`-spawned curl, outside mise's own HTTP layer).
-  Never-contact-the-internet is enforced by the plugin constructing only Nexus URLs.
+  For artifact and go installs, never-contact-the-internet is enforced by the
+  plugin constructing only Nexus and plugin-controlled-proxy URLs.
+  npm and pypi installs are the scoped exception to that mechanism:
+  the plugin constructs no registry URL for them at all —
+  the selected runner uses whatever registry the user's own environment
+  configures, and egress there is enforced by the network, not the plugin.
 - **Under `set -o pipefail`, piping a failing mise command into `grep -q` hides the match** —
   the nonzero mise exit wins the pipeline status. Capture output into a variable first, then grep.
 - **An alias pointing at an uninstalled plugin does not auto-install it.**
@@ -186,6 +207,30 @@ The operative rules:
   Use a strong password and wipe the volumes before retrying.
 - **`install.sh` must be executed directly or with bash.**
   Piping to `sh` runs dash on Debian/Ubuntu, which rejects `set -o pipefail`.
+- **pipx's install-location pins are not all honored on every pipx version.**
+  Verified against pipx 1.4.3: `PIPX_HOME` and `PIPX_BIN_DIR` place the
+  installation and its binaries exactly where told.
+  `PIPX_MAN_DIR`, `PIPX_COMPLETION_DIR`, `PIPX_DEFAULT_BACKEND`, and
+  `PIPX_FETCH_PYTHON` are silently inert on a pipx older than the release
+  that introduced each one —
+  so the no-leftover-files guarantee (man pages, completions) and the
+  pinned-backend guarantee only hold on a sufficiently recent pipx.
+  The plugin always sets all of them regardless:
+  the pins are forward-compatible and a pipx too old to honor one just
+  ignores it, so there is no reason to omit them.
+- **A plugin hook's `print()` output IS visible in default `mise install`
+  output**, surfacing as `INFO [vault] ...` lines —
+  verified against the experiment stack.
+  This is how the npm/pypi install branches' effective-registry diagnostic
+  line (e.g. `npm config get registry`) reaches an ordinary developer
+  without any extra flag.
+- **A Nexus role created by provisioning must be create-or-update, not
+  create-once, once other repositories start relying on it.**
+  `devtools-read` was create-once; adding the npm-proxy and pypi-proxy
+  read privileges to the script did not propagate to a role that already
+  existed on a previously provisioned stack.
+  Anyone who provisioned before the npm/pypi repos existed must re-run
+  `provision-nexus.sh` once to pick up the new privileges.
 
 ## Development environment
 

@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gitlab.company.example/devtools/mise-vault/schemas/versions.schema.json",
   "title": "mise-vault approved versions (catalog/<tool>/versions.json)",
-  "description": "Ordered array, oldest-approved first. Order is authoritative; the plugin returns it verbatim.",
+  "description": "Ordered array, oldest-approved first. Order is authoritative; the plugin returns it verbatim. Per-item shapes intentionally overlap for the bare version-only records (go, npm, pypi): a numeric-looking version like \"1.0.0\" can satisfy more than one ecosystem's envelope at once, so items use anyOf rather than oneOf here. This schema only confirms a record matches at least one known shape; scripts/validate-catalog applies the exact grammar for the tool's declared type using the sibling tool.json file, which a single JSON Schema instance can never see.",
   "type": "array",
   "items": {
-    "oneOf": [
+    "anyOf": [
       {
         "title": "artifact version record",
         "type": "object",
@@ -46,6 +46,34 @@
             "type": "string",
             "pattern": "^h1:[A-Za-z0-9+/]{43}=(?![\\s\\S])",
             "description": "Optional module dirhash from the go proxy. When present the plugin verifies it via 'go mod download' before building and aborts on mismatch. When absent, the go proxy is trusted (the approved-version list is still the gate)."
+          }
+        }
+      },
+      {
+        "title": "npm tool version record",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version"],
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9a-z.-]+)?(\\+[0-9a-z.-]+)?(?![\\s\\S])",
+            "description": "Lowercase semver envelope. No checksum field for this type: none of these ecosystems supports an ad-hoc per-install content hash the way go's h1 does, so the approved-version list is the boundary, as it already is for a go record with no h1."
+          }
+        }
+      },
+      {
+        "title": "PyPI tool version record",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version"],
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[0-9]+(\\.[0-9]+)*((a|b|rc)[0-9]+)?(\\.post[0-9]+)?(\\.dev[0-9]+)?(\\+[0-9a-z]+(\\.[0-9a-z]+)*)?(?![\\s\\S])",
+            "description": "PEP 440 envelope covering the common shapes; epochs and legacy version forms are deliberately not representable. No checksum field, for the same reason as the npm record above."
           }
         }
       }

@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,8 @@ GLAB_V = catalog.latest("glab", REPO_ROOT)
 GO_V = catalog.latest("go", REPO_ROOT)
 GOCENSUS_V = catalog.latest("gocensus", REPO_ROOT)
 GOCENSUS_ALL = catalog.versions("gocensus", REPO_ROOT)
+PRETTIER_V = catalog.latest("prettier", REPO_ROOT)
+RUFF_V = catalog.latest("ruff", REPO_ROOT)
 
 s = Suite("poc-test")
 home = IsolatedHome("mise-vault-poc.")
@@ -45,6 +48,10 @@ home = IsolatedHome("mise-vault-poc.")
 # the generated conf.d file (aliases + nexus_url option per tool)
 # one alias keeps an explicit URL option to cover the override channel
 GOPROXY_HOST_URL = f"{NEXUS_HOST_URL}/repository/go-proxy"
+NPM_PROXY_URL = f"{NEXUS_HOST_URL}/repository/npm-proxy/"
+PYPI_PROXY_SIMPLE_URL = f"{NEXUS_HOST_URL}/repository/pypi-proxy/simple"
+NEXUS_HOST = NEXUS_HOST_URL.split("//", 1)[1].split("/", 1)[0]  # "127.0.0.2:8081"
+NEXUS_HOSTNAME = NEXUS_HOST.split(":", 1)[0]                    # "127.0.0.2"
 ALIASES = {
     "go": "vault:go",
     "glab": "vault:glab",
@@ -52,8 +59,100 @@ ALIASES = {
     "gocensus": "vault:gocensus",
     "gocensus-bad-h1": "vault:gocensus-bad-h1",
     "golangci-lint": f"vault:golangci-lint[nexus_url={NEXUS_HOST_URL}/repository/devtools]",
+    "prettier": "vault:prettier",
+    "ruff": "vault:ruff",
 }
 home.write_aliases(ALIASES)
+
+
+def write_ecosystem_registry_config(home):
+    """USER-ENV registry configuration, mirroring the production shapes:
+    npm/pypi tool types have no MISE_VAULT_*_REGISTRY channel at all —
+    they inherit whatever the user's own toolchain config says, so the
+    plugin never touches these files. All plain http, matching the
+    experiment Nexus."""
+    (home.path / ".npmrc").write_text(f"registry={NPM_PROXY_URL}\n")
+    pip_dir = home.path / ".config/pip"
+    pip_dir.mkdir(parents=True, exist_ok=True)
+    (pip_dir / "pip.conf").write_text(
+        "[global]\n"
+        f"index-url = {PYPI_PROXY_SIMPLE_URL}\n"
+        f"trusted-host = {NEXUS_HOSTNAME}\n")
+    # uv reads only user-level (~/.config/uv/uv.toml) and system-level
+    # config for "uv tool" commands, never a project-local uv.toml, so
+    # the file must live at the user level for this to take effect.
+    uv_dir = home.path / ".config/uv"
+    uv_dir.mkdir(parents=True, exist_ok=True)
+    (uv_dir / "uv.toml").write_text(
+        f'index-url = "{PYPI_PROXY_SIMPLE_URL}"\n'
+        f'allow-insecure-host = ["{NEXUS_HOST}"]\n')
+
+
+write_ecosystem_registry_config(home)
+
+
+def write_broken_registry_config(home):
+    """The same dead-port pattern Phase 5 uses for MISE_VAULT_NEXUS_URL,
+    applied to all three USER-ENV files: nothing listens on 127.0.0.1:9, so
+    a connection to it fails immediately (ECONNREFUSED) instead of a slow
+    DNS/routing timeout."""
+    (home.path / ".npmrc").write_text("registry=http://127.0.0.1:9/repository/npm-proxy/\n")
+    (home.path / ".config/pip/pip.conf").write_text(
+        "[global]\n"
+        "index-url = http://127.0.0.1:9/repository/pypi-proxy/simple\n"
+        "trusted-host = 127.0.0.1\n")
+    (home.path / ".config/uv/uv.toml").write_text(
+        'index-url = "http://127.0.0.1:9/repository/pypi-proxy/simple"\n'
+        'allow-insecure-host = ["127.0.0.1:9"]\n')
+
+
+def assert_registry_channel_drives_install(desc, tool, version, env=None):
+    """Prove the USER-ENV registry file is actually what the runner reads,
+    not merely that the install can succeed some other way (e.g. a local
+    package-manager cache, or an accidental fall-through to the public
+    registry): break the file, the install must fail; restore it, the same
+    install must succeed again. The runner's own top-level error text
+    varies too much across npm/pipx/uv (pipx in particular reports its own
+    banner line, not the underlying pip error, as mise's captured detail)
+    to match reliably on wording, so this checks the BEHAVIOR instead."""
+    e = {**home.env, **(env or {})}
+    write_broken_registry_config(home)
+    r_broken = run(["mise", "install", "-f", f"{tool}@{version}"], env=e)
+    write_ecosystem_registry_config(home)
+    r_fixed = run(["mise", "install", "-f", f"{tool}@{version}"], env=e)
+    s.check(f"{desc}: USER-ENV registry file actually drives the install "
+            "(broken index -> fails, restored index -> succeeds again)",
+            (not r_broken.ok) and r_fixed.ok,
+            detail=f"broken: ok={r_broken.ok} {r_broken.tail()}; restored: ok={r_fixed.ok} {r_fixed.tail()}")
+
+
+def path_without(binary_name, path_str):
+    """A synthetic PATH containing every executable currently reachable
+    except the one named, so a runner's own PATH lookup fails to find it
+    while every other tool the hook needs (sh, mkdir, curl, sha256sum, mise
+    itself, ...) stays available -- simulating "runner not installed"
+    without disturbing anything else the hook or its shell needs."""
+    synth = Path(tempfile.mkdtemp(prefix="mise-vault-poc-nobin."))
+    seen = set()
+    for d in path_str.split(":"):
+        if not d:
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name in seen or name == binary_name:
+                continue
+            src = os.path.join(d, name)
+            try:
+                if os.path.isdir(src) or not os.access(src, os.X_OK):
+                    continue
+                os.symlink(src, synth / name)
+            except OSError:
+                continue
+            seen.add(name)
+    return synth
 
 
 def link_working_tree():
@@ -230,6 +329,213 @@ try:
             (not r.ok) and "no approved go toolchain" in (r.out + r.err), detail=r.tail())
 finally:
     shutil.move(str(go_hidden), str(go_installs))
+
+s.phase(f"Phase 4c: npm-installed tool (prettier, via npm through {NPM_PROXY_URL})")
+install_r = s.check_cmd(
+    f"install prettier@{PRETTIER_V} (npm runner, USER-ENV .npmrc registry)",
+    ["mise", "install", f"prettier@{PRETTIER_V}"], env=home.env)
+r = run(["mise", "exec", f"prettier@{PRETTIER_V}", "--", "prettier", "--version"], env=home.env)
+s.check(f"prettier runs and reports {PRETTIER_V}", PRETTIER_V in r.out, detail=r.tail())
+r = run(["mise", "tool", "prettier", "--backend"], env=home.env)
+s.check("mise tool prettier resolves to the vault backend", r.out.strip() == "vault:prettier",
+        detail=f"got: {r.out.strip()!r}; {r.tail()}")
+# the install log prints the runner's effective registry where the runner
+# can report it (npm config get registry); display only, never validated —
+# task 1 flagged print() visibility from a mise plugin hook as unverified,
+# so this checks the ACTUAL npm-proxy URL, not just the surrounding words
+# (a silent fallback to the public registry would still contain "via npm
+# (registry:", so the assertion has to name the real value to mean anything)
+diag_text = install_r.out + install_r.err
+diag_seen = "via npm (registry:" in diag_text and "127.0.0.2:8081/repository/npm-proxy" in diag_text
+if diag_seen:
+    s.ok("effective-registry diagnostic line shows the real npm-proxy URL in mise install output")
+else:
+    s.note("effective-registry diagnostic line NOT visible (or not showing the real npm-proxy URL) "
+           f"in default 'mise install' output (checked stdout+stderr, {len(diag_text)} bytes); "
+           "print() from a plugin hook is not surfaced by a normal install run", tag="INFO")
+
+# prove the .npmrc file is what actually drove the install above, not some
+# other channel (local npm cache, public-registry fallback, ...)
+assert_registry_channel_drives_install("npm/.npmrc", "prettier", PRETTIER_V,
+    env={"NPM_CONFIG_FETCH_RETRIES": "0", "NPM_CONFIG_FETCH_RETRY_MINTIMEOUT": "500"})
+
+# the pinned noise-suppression env table must be set on every install;
+# --verbose surfaces the constructed cmd.exec command line
+r = run(["mise", "install", "-f", "--verbose", f"prettier@{PRETTIER_V}"], env=home.env)
+verbose_out = r.out + r.err
+s.check("npm noise-suppression pins present on every install (NPM_CONFIG_UPDATE_NOTIFIER/FUND/AUDIT)",
+        r.ok and all(p in verbose_out for p in
+                     ("NPM_CONFIG_UPDATE_NOTIFIER=false", "NPM_CONFIG_FUND=false", "NPM_CONFIG_AUDIT=false")),
+        detail=r.tail())
+
+# the npm install is placed at install_path via --prefix, so nothing lands
+# outside mise's own managed-tool tree; derive install_path from HOME the
+# same way the go smoke-install check above derives its own binary path
+prettier_install_path = home.path / ".local/share/mise/installs/prettier" / PRETTIER_V
+s.check(f"npm install pinned to install_path via --prefix ({prettier_install_path})",
+        f"--prefix '{prettier_install_path}'" in verbose_out, detail=r.tail())
+
+r = run(["mise", "install", f"prettier@9.9.9"], env=home.env)
+s.check("unapproved prettier version rejected",
+        (not r.ok) and "prettier 9.9.9 is not an approved version" in (r.out + r.err), detail=r.tail())
+
+env_bun = {**home.env, "MISE_VAULT_NPM_RUNNER": "bun"}
+r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_bun)
+combined = r.out + r.err
+s.check("MISE_VAULT_NPM_RUNNER=bun rejected with its own not-yet-supported message "
+        "(distinct from the unknown-value error)",
+        (not r.ok) and "the bun runner is not yet supported" in combined
+        and "unknown value" not in combined, detail=r.tail())
+
+env_unknown_npm = {**home.env, "MISE_VAULT_NPM_RUNNER": "yarn"}
+r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_unknown_npm)
+combined = r.out + r.err
+s.check("MISE_VAULT_NPM_RUNNER unknown value rejected, naming the expected values",
+        (not r.ok) and "MISE_VAULT_NPM_RUNNER has an unknown value" in combined
+        and "expected npm or bun" in combined, detail=r.tail())
+
+# runner-missing: a PATH with every tool the hook needs EXCEPT npm itself
+npm_missing_dir = path_without("npm", home.env["PATH"])
+env_no_npm = {**home.env, "PATH": str(npm_missing_dir)}
+r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_no_npm)
+combined = r.out + r.err
+s.check("npm missing from PATH aborts with the guidance message",
+        (not r.ok) and "npm was not found on PATH" in combined
+        and "install it and ensure it is on PATH" in combined, detail=r.tail())
+shutil.rmtree(npm_missing_dir, ignore_errors=True)
+
+# forged-trailer regression (NPMINSTALL_EXIT): a fake npm ahead on PATH
+# prints a forged success marker mid-output, then exits nonzero; the REAL
+# trailer is appended by the outer shell AFTER npm exits, so only an
+# end-anchored parse of the true last line can tell these apart
+forge_dir = home.path / "forge-npm-bin"
+forge_dir.mkdir(parents=True, exist_ok=True)
+forge_npm = forge_dir / "npm"
+forge_npm.write_text("#!/bin/sh\necho 'NPMINSTALL_EXIT=0'\nexit 7\n")
+forge_npm.chmod(0o755)
+env_forge_npm = {**home.env, "PATH": f"{forge_dir}:{home.env['PATH']}"}
+r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_forge_npm)
+s.check("forged NPMINSTALL_EXIT=0 in npm output cannot fake a successful install",
+        (not r.ok) and "npm install failed" in (r.out + r.err), detail=r.tail())
+
+s.phase(f"Phase 4d: pypi-installed tool (ruff, via pipx/uv through {PYPI_PROXY_SIMPLE_URL})")
+s.check_cmd(f"install ruff@{RUFF_V} (pipx runner — default, USER-ENV pip.conf index-url)",
+            ["mise", "install", f"ruff@{RUFF_V}"], env=home.env)
+r = run(["mise", "exec", f"ruff@{RUFF_V}", "--", "ruff", "--version"], env=home.env)
+s.check(f"ruff (pipx) runs and reports {RUFF_V}", RUFF_V in r.out, detail=r.tail())
+r = run(["mise", "tool", "ruff", "--backend"], env=home.env)
+s.check("mise tool ruff resolves to the vault backend", r.out.strip() == "vault:ruff",
+        detail=f"got: {r.out.strip()!r}; {r.tail()}")
+# pipx has no equivalent of "npm config get registry" to report (it installs
+# through pip, reading pip.conf); the design says printing nothing is
+# correct here, unlike the npm branch's registry line
+s.note("pipx runner prints no effective-registry line (documented: no pip-config equivalent "
+       "to report through pipx)", tag="INFO")
+
+# prove pip.conf is what actually drove the pipx install above (pipx's own
+# top-level error text does not repeat the underlying pip error, so this
+# checks behavior — fails broken, succeeds restored — not wording)
+assert_registry_channel_drives_install("pipx/pip.conf", "ruff", RUFF_V,
+    env={"PIP_RETRIES": "0", "PIP_TIMEOUT": "5"})
+
+r = run(["mise", "install", "-f", "--verbose", f"ruff@{RUFF_V}"], env=home.env)
+verbose_out = r.out + r.err
+s.check("pipx pins present on every install (PIPX_DEFAULT_BACKEND/PIPX_FETCH_PYTHON/PIP_DISABLE_PIP_VERSION_CHECK)",
+        r.ok and all(p in verbose_out for p in
+                     ("PIPX_DEFAULT_BACKEND=pip", "PIPX_FETCH_PYTHON=never", "PIP_DISABLE_PIP_VERSION_CHECK=1")),
+        detail=r.tail())
+
+# every pipx placement variable must point beneath install_path, so nothing
+# pipx would normally drop into the user's home directory (man pages, shell
+# completions, the venv itself) survives outside mise's own managed-tool tree
+ruff_install_path = home.path / ".local/share/mise/installs/ruff" / RUFF_V
+s.check(f"pipx placement pins point at install_path "
+        f"(PIPX_HOME/PIPX_BIN_DIR/PIPX_MAN_DIR/PIPX_COMPLETION_DIR under {ruff_install_path})",
+        r.ok and all(p in verbose_out for p in (
+            f"PIPX_HOME='{ruff_install_path}/pipx'",
+            f"PIPX_BIN_DIR='{ruff_install_path}/bin'",
+            f"PIPX_MAN_DIR='{ruff_install_path}/share/man'",
+            f"PIPX_COMPLETION_DIR='{ruff_install_path}/share'",
+        )), detail=r.tail())
+
+env_uv = {**home.env, "MISE_VAULT_PYPI_RUNNER": "uv"}
+s.check_cmd(f"install ruff@{RUFF_V} (uv runner — opt-in, USER-ENV uv.toml at user level)",
+            ["mise", "install", "-f", f"ruff@{RUFF_V}"], env=env_uv)
+r = run(["mise", "exec", f"ruff@{RUFF_V}", "--", "ruff", "--version"], env=home.env)
+s.check(f"ruff (uv) runs and reports {RUFF_V}", RUFF_V in r.out, detail=r.tail())
+
+assert_registry_channel_drives_install("uv/uv.toml", "ruff", RUFF_V, env={"MISE_VAULT_PYPI_RUNNER": "uv"})
+
+r = run(["mise", "install", "-f", "--verbose", f"ruff@{RUFF_V}"], env=env_uv)
+verbose_out = r.out + r.err
+s.check("uv pins present on every install (UV_PYTHON_DOWNLOADS=never)",
+        r.ok and "UV_PYTHON_DOWNLOADS=never" in verbose_out, detail=r.tail())
+
+# uv's managed-tool directory and its launcher directory must both stay
+# beneath install_path too, the same guarantee proven for pipx above (the
+# install_path is the same one, since it depends only on tool + version,
+# never on which runner installed it)
+s.check(f"uv placement pins point at install_path (UV_TOOL_DIR/UV_TOOL_BIN_DIR under {ruff_install_path})",
+        r.ok and all(p in verbose_out for p in (
+            f"UV_TOOL_DIR='{ruff_install_path}/tools'",
+            f"UV_TOOL_BIN_DIR='{ruff_install_path}/bin'",
+        )), detail=r.tail())
+
+r = run(["mise", "install", f"ruff@9.9.9"], env=home.env)
+s.check("unapproved ruff version rejected",
+        (not r.ok) and "ruff 9.9.9 is not an approved version" in (r.out + r.err), detail=r.tail())
+
+env_unknown_pypi = {**home.env, "MISE_VAULT_PYPI_RUNNER": "conda"}
+r = run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=env_unknown_pypi)
+combined = r.out + r.err
+s.check("MISE_VAULT_PYPI_RUNNER unknown value rejected, naming the expected values",
+        (not r.ok) and "MISE_VAULT_PYPI_RUNNER has an unknown value" in combined
+        and "expected pipx or uv" in combined, detail=r.tail())
+
+# runner-missing, both runners
+pipx_missing_dir = path_without("pipx", home.env["PATH"])
+env_no_pipx = {**home.env, "PATH": str(pipx_missing_dir)}
+r = run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=env_no_pipx)
+combined = r.out + r.err
+s.check("pipx missing from PATH aborts with the guidance message",
+        (not r.ok) and "pipx was not found on PATH" in combined
+        and "install it and ensure it is on PATH" in combined, detail=r.tail())
+shutil.rmtree(pipx_missing_dir, ignore_errors=True)
+
+uv_missing_dir = path_without("uv", home.env["PATH"])
+env_no_uv = {**home.env, "PATH": str(uv_missing_dir), "MISE_VAULT_PYPI_RUNNER": "uv"}
+r = run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=env_no_uv)
+combined = r.out + r.err
+s.check("uv missing from PATH aborts with the guidance message",
+        (not r.ok) and "uv was not found on PATH" in combined
+        and "install it and ensure it is on PATH" in combined, detail=r.tail())
+shutil.rmtree(uv_missing_dir, ignore_errors=True)
+
+# forged-trailer regression, one per runner (PIPXINSTALL_EXIT / UVINSTALL_EXIT)
+forge_pipx_dir = home.path / "forge-pipx-bin"
+forge_pipx_dir.mkdir(parents=True, exist_ok=True)
+forge_pipx = forge_pipx_dir / "pipx"
+forge_pipx.write_text("#!/bin/sh\necho 'PIPXINSTALL_EXIT=0'\nexit 7\n")
+forge_pipx.chmod(0o755)
+env_forge_pipx = {**home.env, "PATH": f"{forge_pipx_dir}:{home.env['PATH']}"}
+r = run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=env_forge_pipx)
+s.check("forged PIPXINSTALL_EXIT=0 in pipx output cannot fake a successful install",
+        (not r.ok) and "pipx install failed" in (r.out + r.err), detail=r.tail())
+
+forge_uv_dir = home.path / "forge-uv-bin"
+forge_uv_dir.mkdir(parents=True, exist_ok=True)
+forge_uv = forge_uv_dir / "uv"
+forge_uv.write_text("#!/bin/sh\necho 'UVINSTALL_EXIT=0'\nexit 7\n")
+forge_uv.chmod(0o755)
+env_forge_uv = {**home.env, "PATH": f"{forge_uv_dir}:{home.env['PATH']}", "MISE_VAULT_PYPI_RUNNER": "uv"}
+r = run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=env_forge_uv)
+s.check("forged UVINSTALL_EXIT=0 in uv output cannot fake a successful install",
+        (not r.ok) and "uv tool install failed" in (r.out + r.err), detail=r.tail())
+
+# leave both tools cleanly (re-)installed via their default runners for any
+# later phase that might exec them
+run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=home.env)
+run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=home.env)
 
 s.phase("Phase 5: MISE_VAULT_NEXUS_URL overrides every other URL channel")
 # env var pointing at a dead port must beat the alias option (which points at

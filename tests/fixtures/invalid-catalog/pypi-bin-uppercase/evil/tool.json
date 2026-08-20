@@ -1,0 +1,6 @@
+{
+  "name": "evil",
+  "type": "pypi",
+  "package": "evil",
+  "bin": "Evil"
+}

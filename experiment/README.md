@@ -57,6 +57,22 @@ hostnames (e.g. add `nexus.local` / `gitlab.local` to /etc/hosts).
 http://localhost:8081/repository/devtools/<tool>/<version>/<artifact>
 ```
 
+## Proxy repositories (go/npm/pypi tool types)
+
+Nexus also proxies the public registries these tool types install from, all
+served plain http and readable anonymously (scoped to exactly these three
+repositories — see `provision-nexus.sh` for why):
+
+| Repository | Caches | URL |
+|---|---|---|
+| `go-proxy` | `proxy.golang.org` | `http://localhost:8081/repository/go-proxy` |
+| `npm-proxy` | `registry.npmjs.org` | `http://localhost:8081/repository/npm-proxy` |
+| `pypi-proxy` | `pypi.org` | `http://localhost:8081/repository/pypi-proxy/simple` |
+
+`seed-artifacts.sh` warms each cache with exactly the approved catalog
+versions before an offline run, the same way it uploads artifacts to
+`devtools`.
+
 ## Private mirror / proxy overrides
 
 Every external fetch point is overridable — nothing requires Docker Hub or
@@ -68,6 +84,10 @@ public package indexes once mirrors exist:
 | test image base | `--build-arg BASE_IMAGE=...` | `docker build test-image/` |
 | test image apt packages | `--build-arg APT_MIRROR=http://mirror.../ubuntu` | `docker build test-image/` |
 | mise binary in test image | `--build-arg MISE_BINARY_URL=...` (hosted binary) or `MISE_INSTALL_URL=...` (mirrored install script) | `docker build test-image/` |
+| uv install script in test image | `--build-arg UV_INSTALL_URL=...` | `docker build test-image/` |
+| go-proxy remote | `GO_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
+| npm-proxy remote | `NPM_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
+| pypi-proxy remote | `PYPI_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
 | CI job images | `PYTHON_IMAGE`, `PYTHON_SLIM_IMAGE`, `DEVTOOLS_CI_IMAGE` | GitLab CI variables |
 | Go toolchain for checksum CI | ship go inside `PYTHON_IMAGE` (the job's apt fallback is skipped when the image already has `go`) | GitLab CI variable |
 | CI pip packages | `PIP_INDEX_URL` | GitLab CI variable (pip reads it natively) |

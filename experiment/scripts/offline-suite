@@ -145,6 +145,73 @@ if goc_ok:
 else:
     s.bad(f"gocensus install ({install_r.tail()})")
 
+s.phase("2b. npm and pypi tool types (both pypi runners) with zero public internet")
+
+# There is deliberately no MISE_VAULT_*_REGISTRY channel for these types
+# (design doc section 5): the plugin never touches registry configuration,
+# so — exactly like a real workstation — this container's own USER-ENV
+# files point ecosystem installers at the private Nexus proxy repositories.
+# All plain http, mirroring the production shapes.
+NPM_PROXY_URL = f"{NEXUS_CONTAINER_URL}/repository/npm-proxy/"
+PYPI_PROXY_SIMPLE_URL = f"{NEXUS_CONTAINER_URL}/repository/pypi-proxy/simple"
+NEXUS_HOST = NEXUS_CONTAINER_URL.split("//", 1)[1].split("/", 1)[0]  # "nexus:8081"
+NEXUS_HOSTNAME = NEXUS_HOST.split(":", 1)[0]                        # "nexus"
+
+(HOME / ".npmrc").write_text(f"registry={NPM_PROXY_URL}\n")
+pip_dir = HOME / ".config/pip"
+pip_dir.mkdir(parents=True, exist_ok=True)
+(pip_dir / "pip.conf").write_text(
+    "[global]\n"
+    f"index-url = {PYPI_PROXY_SIMPLE_URL}\n"
+    f"trusted-host = {NEXUS_HOSTNAME}\n")
+# uv reads only user-level (~/.config/uv/uv.toml) and system-level config
+# for "uv tool" commands, never a project-local uv.toml.
+uv_dir = HOME / ".config/uv"
+uv_dir.mkdir(parents=True, exist_ok=True)
+(uv_dir / "uv.toml").write_text(
+    f'index-url = "{PYPI_PROXY_SIMPLE_URL}"\n'
+    f'allow-insecure-host = ["{NEXUS_HOST}"]\n')
+
+aliases["prettier"] = "vault:prettier"
+aliases["ruff"] = "vault:ruff"
+write_aliases(HOME, aliases)
+
+PRETTIER_V = safe_latest("prettier", "/tmp/bootstrap")
+RUFF_V = safe_latest("ruff", "/tmp/bootstrap")
+
+install_r = run(["mise", "install", f"prettier@{PRETTIER_V}"], env=ENV)
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"prettier@{PRETTIER_V}", "--", "prettier", "--version"], env=ENV)
+    prettier_ok = bool(PRETTIER_V) and exec_r.ok and PRETTIER_V in exec_r.out
+else:
+    prettier_ok = False
+if prettier_ok:
+    s.ok("prettier installed via npm and runs (package document + tarball from private npm-proxy)")
+else:
+    s.bad(f"prettier install ({install_r.tail()})")
+
+install_r = run(["mise", "install", f"ruff@{RUFF_V}"], env=ENV)
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"ruff@{RUFF_V}", "--", "ruff", "--version"], env=ENV)
+    ruff_pipx_ok = bool(RUFF_V) and exec_r.ok and RUFF_V in exec_r.out
+else:
+    ruff_pipx_ok = False
+if ruff_pipx_ok:
+    s.ok("ruff installed via pipx (default runner) and runs (simple-API page + wheel from private pypi-proxy)")
+else:
+    s.bad(f"ruff install via pipx ({install_r.tail()})")
+
+install_r = run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env={**ENV, "MISE_VAULT_PYPI_RUNNER": "uv"})
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"ruff@{RUFF_V}", "--", "ruff", "--version"], env=ENV)
+    ruff_uv_ok = bool(RUFF_V) and exec_r.ok and RUFF_V in exec_r.out
+else:
+    ruff_uv_ok = False
+if ruff_uv_ok:
+    s.ok("ruff installed via uv (opt-in runner, USER-ENV uv.toml) and runs, offline")
+else:
+    s.bad(f"ruff install via uv ({install_r.tail()})")
+
 s.phase("3. catalog-only policy holds offline")
 
 # assert the EFFECT (command fails, no versions listed), not mise's wording

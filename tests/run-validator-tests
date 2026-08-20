@@ -30,14 +30,32 @@ FIXTURES = ROOT / "tests" / "fixtures" / "invalid-catalog"
 # go-shaped version record from an artifact-shaped one (or a tool's module
 # from its own name) needs the other file, which a single JSON Schema can
 # never see — those four are built-in/cross-check-only by design.
+# The same reasoning excludes several npm/pypi cases: npm-bin-default-name-
+# too-long needs tool.json's "name" cross-checked against the bin grammar;
+# npm-version-double-plus, npm-version-is-pypi-shaped, pypi-version-hyphen-
+# abuse, and pypi-version-is-npm-shaped are versions that fail their OWN
+# ecosystem's grammar but still satisfy another ecosystem's bare "version"
+# shape (or go's very permissive one), so only the cross-file dispatch on
+# tool.json's declared type — not the schema's anyOf across all shapes —
+# catches them.
 SCHEMA_CASES = ["artifact-traversal", "artifact-shell-metacharacters",
                 "artifact-missing-version", "bin-path-absolute",
                 "bin-path-traversal", "bad-sha256", "unknown-field",
                 "invalid-format", "go-module-shell-metacharacters",
                 "go-module-dot-segment", "go-module-uppercase",
                 "go-module-dot-edge", "go-version-v-prefix",
-                "go-version-uppercase", "go-module-trailing-newline"]
-MIN_CASES = 23
+                "go-version-uppercase", "go-module-trailing-newline",
+                "npm-package-shell-metacharacters", "npm-package-uppercase",
+                "npm-package-trailing-newline", "npm-scope-missing-name",
+                "npm-scope-double-slash", "npm-at-inside-name",
+                "npm-package-too-long", "npm-bin-slash", "npm-bin-uppercase",
+                "npm-version-uppercase-prerelease",
+                "pypi-package-shell-metacharacters", "pypi-package-uppercase",
+                "pypi-package-trailing-newline", "pypi-package-non-normalized",
+                "pypi-package-double-hyphen", "pypi-bin-slash",
+                "pypi-bin-uppercase", "pypi-version-uppercase",
+                "pypi-version-uppercase-local"]
+MIN_CASES = 47
 
 s = Suite("run-validator-tests")
 
@@ -56,18 +74,21 @@ for case in cases:
     s.check(f"built-in engine rejects: {case.name}", not r.ok,
             detail="output: " + r.tail())
 
-# positive coverage for the go shape, isolated from every other tool type
+# positive coverage: tests/fixtures/catalog holds one valid sample per tool
+# shape (go-sample, npm-sample, pypi-sample, plus the artifact-shaped ones),
+# validated together the way the real catalog is.
 GO_SAMPLE = ROOT / "tests" / "fixtures" / "catalog" / "go-sample"
-r = run([VALIDATE, "--engine", "builtin", "--catalog-dir", str(GO_SAMPLE.parent)])
-s.check("built-in engine accepts a valid go tool", r.ok, detail="output: " + r.tail())
+SAMPLES = GO_SAMPLE.parent
+r = run([VALIDATE, "--engine", "builtin", "--catalog-dir", str(SAMPLES)])
+s.check("built-in engine accepts valid go/npm/pypi tools", r.ok, detail="output: " + r.tail())
 
 if importlib.util.find_spec("jsonschema"):
     for name in SCHEMA_CASES:
         r = run([VALIDATE, "--engine", "schema", "--catalog-dir", str(FIXTURES / name)])
         s.check(f"schemas alone reject: {name}", not r.ok,
                 detail="schemas/ has drifted behind the built-in rules; output: " + r.tail())
-    r = run([VALIDATE, "--engine", "schema", "--catalog-dir", str(GO_SAMPLE.parent)])
-    s.check("schemas alone accept a valid go tool", r.ok, detail="output: " + r.tail())
+    r = run([VALIDATE, "--engine", "schema", "--catalog-dir", str(SAMPLES)])
+    s.check("schemas alone accept valid go/npm/pypi tools", r.ok, detail="output: " + r.tail())
 else:
     s.note("jsonschema not installed — schema-only passes skipped (CI runs them)", tag="NOTE")
 

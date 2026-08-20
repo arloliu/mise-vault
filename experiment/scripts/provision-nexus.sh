@@ -22,6 +22,13 @@
 #       The security boundary stays the approved-version list in the
 #       catalog, so making the mirror itself world-readable gives
 #       nothing away.
+#   4d-4f. Create an npm proxy repository (caches registry.npmjs.org) and a
+#       pypi proxy repository (caches pypi.org), for npm- and pypi-installed
+#       tools (design doc docs/specs/2026-08-20-ecosystem-tools-design.md
+#       section 8), and extend the same scoped anonymous-read exception to
+#       both: npm has no netrc auth channel at all, and the experiment's
+#       USER-ENV .npmrc / pip.conf / uv.toml carry no embedded credentials,
+#       mirroring the production shapes.
 #   5. Create a read-only role + `developer` user (simulates workstation credentials).
 #   6. Upload a smoke artifact as admin, download it back as developer, verify sha256.
 set -euo pipefail
@@ -156,25 +163,168 @@ curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/anonymous" \
   -d '{"enabled": true, "userId": "anonymous", "realmName": "NexusAuthorizingRealm"}' >/dev/null
 log "anonymous access re-enabled, scoped to $GO_PROXY_REPO only (role: $GO_PROXY_ANON_ROLE)"
 
-# --- 5. read-only role + developer user ----------------------------------
-if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/devtools-read" >/dev/null 2>&1; then
-  log "role devtools-read already exists"
+# --- 4d. npm proxy repository (caches registry.npmjs.org for npm-installed tools) ---
+# Same rationale as the go proxy above, generalized to ecosystem tool types
+# (design doc section 8): npm does not read netrc, so the experiment's
+# USER-ENV .npmrc points at this repository with no embedded credentials —
+# anonymous read is therefore required here too, scoped the same way.
+NPM_PROXY_REPO=npm-proxy
+NPM_PROXY_REMOTE=${NPM_PROXY_REMOTE:-https://registry.npmjs.org}
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/repositories/npm/proxy/$NPM_PROXY_REPO" >/dev/null 2>&1; then
+  log "repository '$NPM_PROXY_REPO' already exists"
+else
+  curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/repositories/npm/proxy" \
+    -H 'Content-Type: application/json' -d "{
+      \"name\": \"$NPM_PROXY_REPO\",
+      \"online\": true,
+      \"storage\": {
+        \"blobStoreName\": \"default\",
+        \"strictContentTypeValidation\": true
+      },
+      \"proxy\": {
+        \"remoteUrl\": \"$NPM_PROXY_REMOTE\",
+        \"contentMaxAge\": 1440,
+        \"metadataMaxAge\": 1440
+      },
+      \"negativeCache\": {
+        \"enabled\": true,
+        \"timeToLive\": 1440
+      },
+      \"httpClient\": {
+        \"blocked\": false,
+        \"autoBlock\": true
+      }
+    }"
+  log "created npm proxy repository '$NPM_PROXY_REPO' (caches $NPM_PROXY_REMOTE)"
+fi
+
+# --- 4e. pypi proxy repository (caches pypi.org for pypi-installed tools) ---
+PYPI_PROXY_REPO=pypi-proxy
+PYPI_PROXY_REMOTE=${PYPI_PROXY_REMOTE:-https://pypi.org}
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/repositories/pypi/proxy/$PYPI_PROXY_REPO" >/dev/null 2>&1; then
+  log "repository '$PYPI_PROXY_REPO' already exists"
+else
+  curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/repositories/pypi/proxy" \
+    -H 'Content-Type: application/json' -d "{
+      \"name\": \"$PYPI_PROXY_REPO\",
+      \"online\": true,
+      \"storage\": {
+        \"blobStoreName\": \"default\",
+        \"strictContentTypeValidation\": true
+      },
+      \"proxy\": {
+        \"remoteUrl\": \"$PYPI_PROXY_REMOTE\",
+        \"contentMaxAge\": 1440,
+        \"metadataMaxAge\": 1440
+      },
+      \"negativeCache\": {
+        \"enabled\": true,
+        \"timeToLive\": 1440
+      },
+      \"httpClient\": {
+        \"blocked\": false,
+        \"autoBlock\": true
+      }
+    }"
+  log "created pypi proxy repository '$PYPI_PROXY_REPO' (caches $PYPI_PROXY_REMOTE)"
+fi
+
+# --- 4f. anonymous read, scoped to ONLY the go/npm/pypi proxy repositories ---
+# Same reasoning as 4c, extended to the two new proxy repos: npm has no
+# netrc-based auth channel at all, and the experiment's pip.conf / uv.toml
+# carry no embedded credentials either (mirroring the production shapes in
+# the design doc), so both proxies need the same scoped anonymous exception.
+NPM_PROXY_ANON_ROLE=npm-proxy-anon-read
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/$NPM_PROXY_ANON_ROLE" >/dev/null 2>&1; then
+  log "role $NPM_PROXY_ANON_ROLE already exists"
 else
   curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/security/roles" \
     -H 'Content-Type: application/json' -d "{
-      \"id\": \"devtools-read\",
-      \"name\": \"devtools-read\",
-      \"description\": \"read-only access to $REPO and $GO_PROXY_REPO\",
+      \"id\": \"$NPM_PROXY_ANON_ROLE\",
+      \"name\": \"$NPM_PROXY_ANON_ROLE\",
+      \"description\": \"anonymous read of $NPM_PROXY_REPO ONLY — never $REPO\",
       \"privileges\": [
-        \"nx-repository-view-raw-$REPO-read\",
-        \"nx-repository-view-raw-$REPO-browse\",
-        \"nx-repository-view-go-$GO_PROXY_REPO-read\",
-        \"nx-repository-view-go-$GO_PROXY_REPO-browse\"
+        \"nx-repository-view-npm-$NPM_PROXY_REPO-read\",
+        \"nx-repository-view-npm-$NPM_PROXY_REPO-browse\"
       ],
       \"roles\": []
     }" >/dev/null
-  log "created role devtools-read"
+  log "created role $NPM_PROXY_ANON_ROLE"
 fi
+PYPI_PROXY_ANON_ROLE=pypi-proxy-anon-read
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/$PYPI_PROXY_ANON_ROLE" >/dev/null 2>&1; then
+  log "role $PYPI_PROXY_ANON_ROLE already exists"
+else
+  curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/security/roles" \
+    -H 'Content-Type: application/json' -d "{
+      \"id\": \"$PYPI_PROXY_ANON_ROLE\",
+      \"name\": \"$PYPI_PROXY_ANON_ROLE\",
+      \"description\": \"anonymous read of $PYPI_PROXY_REPO ONLY — never $REPO\",
+      \"privileges\": [
+        \"nx-repository-view-pypi-$PYPI_PROXY_REPO-read\",
+        \"nx-repository-view-pypi-$PYPI_PROXY_REPO-browse\"
+      ],
+      \"roles\": []
+    }" >/dev/null
+  log "created role $PYPI_PROXY_ANON_ROLE"
+fi
+curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/users/anonymous" \
+  -H 'Content-Type: application/json' -d "{
+    \"userId\": \"anonymous\",
+    \"firstName\": \"Anonymous\",
+    \"lastName\": \"User\",
+    \"emailAddress\": \"anonymous@example.org\",
+    \"source\": \"default\",
+    \"status\": \"active\",
+    \"roles\": [\"$GO_PROXY_ANON_ROLE\", \"$NPM_PROXY_ANON_ROLE\", \"$PYPI_PROXY_ANON_ROLE\"]
+  }" >/dev/null
+curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/anonymous" \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "userId": "anonymous", "realmName": "NexusAuthorizingRealm"}' >/dev/null
+log "anonymous access re-enabled, scoped to $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO only"
+
+# --- 5. read-only role + developer user ----------------------------------
+# This role is always PUT (create-or-update), not create-once: unlike the
+# other roles in this script, it must stay CURRENT rather than merely
+# present.
+# Reason (an experiment-only instance of the AGENTS.md netrc lesson):
+# npm-proxy/pypi-proxy/go-proxy live on the SAME host:port as the
+# authenticated-only devtools repo, and netrc has no port field, so a
+# developer's netrc entry for this host is picked up automatically by any
+# netrc-aware HTTP client (pip's requests library does this) even for a
+# proxy repository request that would otherwise go through anonymously.
+# If devtools-read ever fell behind (missing a proxy's read privilege), a
+# developer's own valid credentials would silently turn an anonymous-OK
+# request into an authenticated-but-forbidden one — observed empirically
+# here as "pip: could not find a version" through the pypi proxy with a
+# stale role.
+# Keeping devtools-read a superset of the anonymous grants makes that
+# failure mode structurally impossible instead of order-dependent.
+DEVTOOLS_ROLE_METHOD=POST
+DEVTOOLS_ROLE_URL="$NEXUS_URL/service/rest/v1/security/roles"
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/devtools-read" >/dev/null 2>&1; then
+  log "role devtools-read already exists; refreshing its privileges"
+  DEVTOOLS_ROLE_METHOD=PUT
+  DEVTOOLS_ROLE_URL="$NEXUS_URL/service/rest/v1/security/roles/devtools-read"
+fi
+curl -sf -u "$AUTH" -X "$DEVTOOLS_ROLE_METHOD" "$DEVTOOLS_ROLE_URL" \
+  -H 'Content-Type: application/json' -d "{
+    \"id\": \"devtools-read\",
+    \"name\": \"devtools-read\",
+    \"description\": \"read-only access to $REPO, $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO\",
+    \"privileges\": [
+      \"nx-repository-view-raw-$REPO-read\",
+      \"nx-repository-view-raw-$REPO-browse\",
+      \"nx-repository-view-go-$GO_PROXY_REPO-read\",
+      \"nx-repository-view-go-$GO_PROXY_REPO-browse\",
+      \"nx-repository-view-npm-$NPM_PROXY_REPO-read\",
+      \"nx-repository-view-npm-$NPM_PROXY_REPO-browse\",
+      \"nx-repository-view-pypi-$PYPI_PROXY_REPO-read\",
+      \"nx-repository-view-pypi-$PYPI_PROXY_REPO-browse\"
+    ],
+    \"roles\": []
+  }" >/dev/null
+log "role devtools-read is current"
 
 if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/users?userId=$DEV_USER" | grep -q "\"userId\" *: *\"$DEV_USER\""; then
   log "user $DEV_USER already exists"
@@ -229,10 +379,59 @@ case "$GO_PROXY_PROBE_CODE" in
 esac
 log "anonymous read of $GO_PROXY_REPO correctly allowed (scoped exception; probe HTTP $GO_PROXY_PROBE_CODE)"
 
+NPM_PROXY_PROBE_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+  "$NEXUS_URL/repository/$NPM_PROXY_REPO/does-not-exist-mise-vault")
+case "$NPM_PROXY_PROBE_CODE" in
+  401|403)
+    echo "ERROR: anonymous read of $NPM_PROXY_REPO was rejected (HTTP $NPM_PROXY_PROBE_CODE)"
+    exit 1
+    ;;
+esac
+log "anonymous read of $NPM_PROXY_REPO correctly allowed (scoped exception; probe HTTP $NPM_PROXY_PROBE_CODE)"
+
+PYPI_PROXY_PROBE_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+  "$NEXUS_URL/repository/$PYPI_PROXY_REPO/simple/does-not-exist-mise-vault/")
+case "$PYPI_PROXY_PROBE_CODE" in
+  401|403)
+    echo "ERROR: anonymous read of $PYPI_PROXY_REPO was rejected (HTTP $PYPI_PROXY_PROBE_CODE)"
+    exit 1
+    ;;
+esac
+log "anonymous read of $PYPI_PROXY_REPO correctly allowed (scoped exception; probe HTTP $PYPI_PROXY_PROBE_CODE)"
+
 # developer (read-only) must succeed and hash must match
 GOT_SHA=$(curl -sf -u "$DEV_USER:$DEV_PW" "$NEXUS_URL/repository/$REPO/$SMOKE_PATH" | sha256sum | awk '{print $1}')
 [ "$GOT_SHA" = "$WANT_SHA" ] || { echo "ERROR: sha mismatch"; exit 1; }
 log "developer download + sha256 verified"
+
+# developer must also be able to read npm-proxy and pypi-proxy, not just
+# devtools: netrc has no port field, and these proxies share a host:port
+# with devtools, so a developer's netrc credentials are picked up
+# automatically by any netrc-aware client (pip's requests library does
+# this) even for a request that would otherwise go through anonymously.
+# If devtools-read ever fell behind (see the comment above it), that would
+# silently turn an anonymous-OK proxy request into an authenticated-but-
+# forbidden one for anyone with valid developer credentials in ~/.netrc —
+# this probe catches that regression loudly instead of as a confusing
+# "pip: could not find a version" failure downstream.
+DEV_NPM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$DEV_USER:$DEV_PW" \
+  "$NEXUS_URL/repository/$NPM_PROXY_REPO/does-not-exist-mise-vault")
+case "$DEV_NPM_CODE" in
+  401|403)
+    echo "ERROR: developer read of $NPM_PROXY_REPO was rejected (HTTP $DEV_NPM_CODE) — devtools-read is stale"
+    exit 1
+    ;;
+esac
+log "developer read of $NPM_PROXY_REPO correctly allowed (probe HTTP $DEV_NPM_CODE)"
+DEV_PYPI_CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$DEV_USER:$DEV_PW" \
+  "$NEXUS_URL/repository/$PYPI_PROXY_REPO/simple/does-not-exist-mise-vault/")
+case "$DEV_PYPI_CODE" in
+  401|403)
+    echo "ERROR: developer read of $PYPI_PROXY_REPO was rejected (HTTP $DEV_PYPI_CODE) — devtools-read is stale"
+    exit 1
+    ;;
+esac
+log "developer read of $PYPI_PROXY_REPO correctly allowed (probe HTTP $DEV_PYPI_CODE)"
 
 # developer must NOT be able to write
 if curl -sf -u "$DEV_USER:$DEV_PW" --upload-file "$TMPF" \
@@ -245,5 +444,8 @@ log "Nexus provisioning complete"
 echo
 echo "  URL        : $NEXUS_URL"
 echo "  admin      : admin / $ADMIN_NEW_PW"
-echo "  developer  : $DEV_USER / $DEV_PW  (read-only on $REPO)"
+echo "  developer  : $DEV_USER / $DEV_PW  (read-only on $REPO, $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO)"
 echo "  repository : $NEXUS_URL/repository/$REPO/<tool>/<version>/<artifact>"
+echo "  go proxy   : $NEXUS_URL/repository/$GO_PROXY_REPO  (caches $GO_PROXY_REMOTE; anonymous read)"
+echo "  npm proxy  : $NEXUS_URL/repository/$NPM_PROXY_REPO  (caches $NPM_PROXY_REMOTE; anonymous read)"
+echo "  pypi proxy : $NEXUS_URL/repository/$PYPI_PROXY_REPO/simple  (caches $PYPI_PROXY_REMOTE; anonymous read)"

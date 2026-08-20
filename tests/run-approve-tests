@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # Regression coverage for scripts/approve's preflight and failure-message
-# behavior. No network reachable to a real Nexus is needed: preflight
-# rejections never reach add-version, and the two failure-message cases
-# point --nexus-url at an unreachable local port so add-version fails fast.
+# behavior, plus scripts/add-version's own npm/pypi checks that approve's
+# generic preflight cannot perform (ecosystem version-envelope grammar,
+# PyPI normalization, and registry-probe existence). No network reachable
+# to a real Nexus/npm-registry/PyPI-index is needed anywhere in this file:
+# preflight rejections never reach add-version, the two failure-message
+# cases point --nexus-url at an unreachable local port so add-version
+# fails fast, and the npm/pypi probe cases run a throwaway local HTTP
+# server that answers exactly like the real registry/index would for the
+# scenario under test.
 #
 # Every preflight-rejection case is asserted four ways: the process exit
 # code, that the catalog copy under test is byte-for-byte unchanged
@@ -13,21 +19,51 @@
 # catalog untouched by failing later inside add-version (for example its own
 # artifact probe against the unreachable Nexus URL), which would make the
 # test pass for the wrong reason.
+#
+# The npm/pypi add-version cases below are asserted three ways instead
+# (exit code, catalog unchanged, diagnostic present): they call
+# scripts/add-version directly, since their checks (version-envelope
+# grammar, PyPI normalization, registry probe) live inside add-version
+# itself, not in approve's preflight, so the "add-version never invoked"
+# assertion would not make sense for them.
+import http.client
+import http.server
+import importlib.machinery
+import importlib.util
 import shutil
 import sys
 import tempfile
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib.harness import Suite, run
+from lib import servers
 
 ROOT = Path(__file__).resolve().parent.parent
 APPROVE = str(ROOT / "scripts" / "approve")
 ADD_VERSION = str(ROOT / "scripts" / "add-version")
+VERIFY_ARTIFACTS = str(ROOT / "scripts" / "verify-artifacts")
 ADD_VERSION_MARKER = f"$ {ADD_VERSION}"
 UNREACHABLE = "http://127.0.0.1:9"  # port 9 (discard) refuses connections immediately
 
 s = Suite("run-approve-tests")
+
+
+def load_script_module(name, path):
+    """Import a standalone script (no .py extension, so it is never
+    importable the normal way) as a module, so its functions can be called
+    directly in-process. Used only to prove scripts/add-version and
+    scripts/verify-artifacts carry the SAME PyPI filename-matching logic at
+    runtime, not just textually -- a subprocess run through add-version
+    alone would never execute verify-artifacts' copy at all."""
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def snapshot(catalog_dir):
@@ -50,6 +86,110 @@ def fresh_catalog(tmp_root):
     catalog_dir = Path(tmp_root) / f"catalog-{CASE_COUNT[0]}"
     shutil.copytree(ROOT / "catalog", catalog_dir)
     return catalog_dir
+
+
+def _wait_until_up(port, timeout=10):
+    """Block until the mock server on 127.0.0.1:port answers anything at
+    all -- the test's own request always comes after this returns."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request("GET", "/ready")
+            conn.getresponse()
+            return
+        except OSError:
+            pass
+        time.sleep(0.1)
+    raise RuntimeError(f"mock server did not come up on 127.0.0.1:{port}")
+
+
+@contextmanager
+def fixed_response_server(port, body, status=200, content_type="application/json"):
+    """Answers every GET with a fixed status/body -- stands in for an npm
+    registry or PyPI simple index for exactly one probe scenario, without
+    reaching any real registry."""
+    payload = body if isinstance(body, bytes) else body.encode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _wait_until_up(port)
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def assert_add_version_rejected(desc, tool, version, tmp_root, expect_diagnostic,
+                                 extra_argv=(), setup=None):
+    """Run scripts/add-version directly (not through approve) against a
+    fresh catalog copy and assert it was rejected: nonzero exit, catalog
+    unchanged, and the expected diagnostic in stderr. Used for checks that
+    live INSIDE add-version's npm/pypi handling (version-envelope grammar,
+    PyPI normalization, registry-probe existence) -- approve's own
+    preflight never performs these, so it cannot reject these cases on its
+    own; "add-version never invoked" would not make sense to assert here."""
+    catalog_dir = fresh_catalog(tmp_root)
+    if setup:
+        setup(catalog_dir)
+    before = snapshot(catalog_dir)
+    r = run([ADD_VERSION, tool, version, "--catalog-dir", str(catalog_dir), *extra_argv])
+    after = snapshot(catalog_dir)
+    s.check(f"{desc}: rejected (exit != 0)", not r.ok, detail=r.tail())
+    s.check(f"{desc}: catalog unchanged", before == after,
+            detail="a rejected add-version must never write")
+    s.check(f"{desc}: diagnostic present",
+            expect_diagnostic in r.err,
+            detail=f"expected {expect_diagnostic!r} in stderr; got {r.tail()}")
+    return r
+
+
+def write_tool(catalog_dir, name, tool_json):
+    """Add a throwaway tool directory to a fresh catalog copy, for a case
+    that needs a tool.json shape not present in the real catalog (a
+    non-normalized PyPI package name, for example). Only ever writes into
+    the test's own tmp copy, never tests/fixtures/ or the real catalog/."""
+    import json
+
+    tool_dir = Path(catalog_dir) / name
+    tool_dir.mkdir()
+    (tool_dir / "tool.json").write_text(json.dumps(tool_json, indent=2) + "\n")
+    (tool_dir / "versions.json").write_text("[]\n")
+
+
+def assert_add_version_accepted(desc, tool, version, tmp_root, extra_argv=(), setup=None):
+    """Run scripts/add-version directly (not through approve), in --dry-run
+    mode, against a fresh catalog copy and assert it was accepted: exit 0,
+    catalog unchanged (a dry run never writes), and the probe's own success
+    message in stdout. Used for checks that live INSIDE add-version's npm/pypi
+    handling, mirroring assert_add_version_rejected above."""
+    catalog_dir = fresh_catalog(tmp_root)
+    if setup:
+        setup(catalog_dir)
+    before = snapshot(catalog_dir)
+    r = run([ADD_VERSION, tool, version, "--catalog-dir", str(catalog_dir),
+             "--dry-run", *extra_argv])
+    after = snapshot(catalog_dir)
+    s.check(f"{desc}: accepted (exit == 0)", r.ok, detail=r.tail())
+    s.check(f"{desc}: catalog unchanged (dry-run)", before == after,
+            detail="a dry-run add-version must never write")
+    s.check(f"{desc}: dry-run append preview shown",
+            "would append to" in r.out,
+            detail=f"expected the dry-run append preview in stdout; got {r.tail()}")
+    return r
 
 
 def assert_rejected(desc, specs, tmp_root, expect_diagnostic):
@@ -75,6 +215,37 @@ def assert_rejected(desc, specs, tmp_root, expect_diagnostic):
             ADD_VERSION_MARKER not in r.out,
             detail="a preflight rejection must never reach add-version")
 
+
+# --- direct in-process check that scripts/add-version's and
+# scripts/verify-artifacts' copies of the PyPI filename-matching helper
+# behave identically, not just read identically. Everything else in this
+# file drives verify-artifacts only indirectly (add-version is what runs
+# as a subprocess for every case above); calling the shared function
+# directly is what actually exercises verify-artifacts' copy at all. ---
+add_version_mod = load_script_module("mise_vault_add_version", ADD_VERSION)
+verify_artifacts_mod = load_script_module("mise_vault_verify_artifacts", VERIFY_ARTIFACTS)
+for mod_name, mod in (("add-version", add_version_mod), ("verify-artifacts", verify_artifacts_mod)):
+    fn = mod.pypi_version_in_filenames
+    s.check(f"{mod_name}: pypi_version_in_filenames matches PEP 625 sdist form",
+            fn(["sample_pkg-1.2.3.tar.gz"], "sample-pkg", "1.2.3") == (True, True))
+    s.check(f"{mod_name}: pypi_version_in_filenames matches wheel form",
+            fn(["sample_pkg-1.2.3-py3-none-any.whl"], "sample-pkg", "1.2.3") == (True, True))
+    s.check(f"{mod_name}: pypi_version_in_filenames matches legacy hyphenated sdist form",
+            fn(["sample-pkg-1.2.3.tar.gz"], "sample-pkg", "1.2.3") == (True, True))
+    s.check(f"{mod_name}: pypi_version_in_filenames reports absence for a listed-but-wrong version",
+            fn(["sample-pkg-9.9.9.tar.gz"], "sample-pkg", "1.2.3") == (False, True))
+    s.check(f"{mod_name}: pypi_version_in_filenames reports checked_any=False for an unparseable list",
+            fn(["not-a-package-file.txt"], "sample-pkg", "1.2.3") == (False, False))
+    s.check(f"{mod_name}: pypi_version_in_filenames matches a .tar.xz sdist",
+            fn(["sample_pkg-1.2.3.tar.xz"], "sample-pkg", "1.2.3") == (True, True))
+    s.check(f"{mod_name}: pypi_version_in_filenames matches a .tgz sdist",
+            fn(["sample_pkg-1.2.3.tgz"], "sample-pkg", "1.2.3") == (True, True))
+    s.check(f"{mod_name}: a listed-but-wrong-version .tgz counts as checked, reported absent",
+            fn(["sample-pkg-9.9.9.tgz"], "sample-pkg", "1.2.3") == (False, True))
+    s.check(f"{mod_name}: a listed-but-wrong-version .tar.xz counts as checked, reported absent",
+            fn(["sample-pkg-9.9.9.tar.xz"], "sample-pkg", "1.2.3") == (False, True))
+    s.check(f"{mod_name}: an egg-only file list is unreadable, never a false absence",
+            fn(["sample_pkg-1.2.3-py2.7.egg"], "sample-pkg", "1.2.3") == (False, False))
 
 with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
     assert_rejected("malformed spec", "badspec", tmp, "malformed spec")
@@ -120,5 +291,146 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
     combined = r.out + r.err
     s.check("real-run failure (first spec): exit 1", r.rc == 1, detail=r.tail())
     s.check("real-run failure (first spec): catalog unchanged", before == after)
+
+    # --- approve preflight: npm/pypi tools go through the same generic
+    # checks as any other tool (an already-approved version, in particular,
+    # is a preflight rejection regardless of type) ---
+    assert_rejected("npm tool: already-approved version", "prettier@3.9.6", tmp,
+                     "already in catalog")
+    assert_rejected("pypi tool: already-approved version", "ruff@0.16.3", tmp,
+                     "already in catalog")
+
+    # --- add-version: npm/pypi version-envelope grammar (checked inside
+    # add-version itself, before any registry is contacted -- no mock
+    # server needed for these) ---
+    assert_add_version_rejected(
+        "npm version grammar: uppercase prerelease", "prettier", "3.9.6-RC.1", tmp,
+        "does not match the npm version envelope")
+    assert_add_version_rejected(
+        "pypi version grammar: hyphen not in the PEP 440 envelope", "ruff", "1.0.0-rc1", tmp,
+        "does not match the PyPI version envelope")
+
+    # --- add-version: non-normalized PyPI package name is refused and the
+    # normalized form is named, never silently rewritten. Needs a throwaway
+    # tool.json the real catalog does not carry (every real pypi entry is
+    # already normalized), added only to this test's own catalog copy. ---
+    assert_add_version_rejected(
+        "pypi non-normalized package: refused, normalized form named",
+        "badpypi-nonnorm", "1.0.0", tmp,
+        "use the normalized form 'bad-name'",
+        setup=lambda catalog_dir: write_tool(
+            catalog_dir, "badpypi-nonnorm",
+            {"name": "badpypi-nonnorm", "type": "pypi", "package": "Bad_Name"}))
+
+    # --- add-version: npm/pypi registry probes, against a throwaway local
+    # HTTP server standing in for the real registry/index. These prove the
+    # probe-absent and redirect-refusal paths without reaching the network,
+    # mirroring how the go probe's own redirect/absent handling is proven
+    # (see AGENTS.md's redirect-refusal lesson and scripts/verify-artifacts'
+    # go probe) -- for npm/pypi that coverage lives here since approve's
+    # preflight never reaches these checks. ---
+    with fixed_response_server(18461, '{"versions": {"1.0.0": {}}}') as registry:
+        assert_add_version_rejected(
+            "npm probe: version not in registry doc", "prettier", "9.9.9", tmp,
+            "version not listed in the npm registry package document",
+            extra_argv=["--npm-registry-url", registry])
+
+    with fixed_response_server(
+            18462, '{"files": [{"filename": "ruff-1.2.3.tar.gz"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        assert_add_version_rejected(
+            "pypi probe: version not among listed files (PEP 691, no PEP 700 versions list)",
+            "ruff", "9.9.9", tmp,
+            "version not found among the PyPI simple index's listed files",
+            extra_argv=["--pypi-index-url", index])
+
+    with fixed_response_server(
+            18463,
+            '<!DOCTYPE html><html><body>'
+            '<a href="../../packages/ruff-1.2.3.tar.gz">ruff-1.2.3.tar.gz</a>'
+            '</body></html>',
+            content_type="text/html") as index:
+        assert_add_version_rejected(
+            "pypi probe: version not among listed files (HTML fallback)",
+            "ruff", "9.9.9", tmp,
+            "version not found among the PyPI simple index's listed files (HTML)",
+            extra_argv=["--pypi-index-url", index])
+
+    # --- add-version: PyPI filename-fallback matching for a HYPHENATED
+    # project name. The cases above only ever use "ruff" (no hyphen in the
+    # project name), so a filename fallback that misparses a hyphenated
+    # name by token-splitting on every "-" would still pass them; these
+    # cases would not. All three use a throwaway tool.json (the real
+    # catalog carries no hyphenated pypi package) with package "sample-pkg"
+    # and target version "1.2.3", proving the PEP 625 sdist form, the
+    # wheel form, and the legacy sdist form are all accepted, across both
+    # the PEP 691 JSON-files fallback and the PEP 503 HTML fallback. ---
+    def setup_hyphenated_pypi(catalog_dir):
+        write_tool(catalog_dir, "pypi-hyphenated-sample",
+                   {"name": "pypi-hyphenated-sample", "type": "pypi", "package": "sample-pkg"})
+
+    with fixed_response_server(
+            18466, '{"files": [{"filename": "sample_pkg-1.2.3.tar.gz"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        assert_add_version_accepted(
+            "pypi probe: hyphenated package, PEP 625 sdist form (PEP 691 JSON files-list)",
+            "pypi-hyphenated-sample", "1.2.3", tmp,
+            extra_argv=["--pypi-index-url", index],
+            setup=setup_hyphenated_pypi)
+
+    with fixed_response_server(
+            18467,
+            '<!DOCTYPE html><html><body>'
+            '<a href="../../packages/sample_pkg-1.2.3-py3-none-any.whl">'
+            'sample_pkg-1.2.3-py3-none-any.whl</a>'
+            '</body></html>',
+            content_type="text/html") as index:
+        assert_add_version_accepted(
+            "pypi probe: hyphenated package, wheel form (PEP 503 HTML fallback)",
+            "pypi-hyphenated-sample", "1.2.3", tmp,
+            extra_argv=["--pypi-index-url", index],
+            setup=setup_hyphenated_pypi)
+
+    with fixed_response_server(
+            18470, '{"files": [{"filename": "sample-pkg-1.2.3.tar.gz"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        assert_add_version_accepted(
+            "pypi probe: hyphenated package, legacy sdist form (PEP 691 JSON files-list)",
+            "pypi-hyphenated-sample", "1.2.3", tmp,
+            extra_argv=["--pypi-index-url", index],
+            setup=setup_hyphenated_pypi)
+
+    # The legacy sdist form is the one a token-split-on-every-hyphen bug
+    # actually misparses ("sample-pkg-1.2.3.tar.gz" splits into "sample",
+    # "pkg", "1.2.3.tar.gz", reading "pkg" as the version) — the PEP 625
+    # and wheel filenames above both use an underscore in the project name
+    # position, so they would parse "correctly" even under that bug. Cover
+    # the legacy form through the HTML fallback too, so a regression in
+    # either fallback path is caught, not just the JSON one.
+    with fixed_response_server(
+            18471,
+            '<!DOCTYPE html><html><body>'
+            '<a href="../../packages/sample-pkg-1.2.3.tar.gz">sample-pkg-1.2.3.tar.gz</a>'
+            '</body></html>',
+            content_type="text/html") as index:
+        assert_add_version_accepted(
+            "pypi probe: hyphenated package, legacy sdist form (PEP 503 HTML fallback)",
+            "pypi-hyphenated-sample", "1.2.3", tmp,
+            extra_argv=["--pypi-index-url", index],
+            setup=setup_hyphenated_pypi)
+
+    log = str(Path(tmp) / "npm-redirect.log")
+    with servers.redirect_server(18464, "http://127.0.0.2:1", log):
+        assert_add_version_rejected(
+            "npm probe: redirect refused", "prettier", "1.0.0", tmp,
+            "redirects are refused",
+            extra_argv=["--npm-registry-url", "http://127.0.0.1:18464"])
+
+    log = str(Path(tmp) / "pypi-redirect.log")
+    with servers.redirect_server(18465, "http://127.0.0.2:1", log):
+        assert_add_version_rejected(
+            "pypi probe: redirect refused", "ruff", "1.0.0", tmp,
+            "redirects are refused",
+            extra_argv=["--pypi-index-url", "http://127.0.0.1:18465"])
 
 sys.exit(s.finish())

@@ -1,0 +1,5 @@
+{
+  "name": "pypi-sample",
+  "type": "pypi",
+  "package": "sample-pkg"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "npm-sample",
+  "type": "npm",
+  "package": "@scope/pkg-name",
+  "bin": "pkg"
+}

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Seed the Nexus `devtools` repo with real tool artifacts (simulates the
-# trusted build pipeline output). Public internet is used HERE ONLY —
-# afterwards the PoC must work entirely against Nexus.
+# trusted build pipeline output), and warm the go-proxy/npm-proxy/pypi-proxy
+# caches for the source-built and ecosystem tool types.
+# Public internet is used HERE ONLY — afterwards the PoC must work entirely
+# against Nexus.
 #
 # Produces experiment/artifacts.manifest:  <tool> <version> <platform> <sha256> <artifact>
 # Runs from a network with internet access; behind a corporate proxy, set the
@@ -147,6 +149,61 @@ while read -r v; do
   fi
 done < "$WORK/gocensus.versions"
 rm -rf "$GOWARM"
+
+# --- npm-proxy cache warming (npm-installed tools; catalog/prettier) -------
+# Same philosophy as the go-proxy warming above: an npm tool has no Nexus
+# artifact to upload, its content is the npm proxy repository's cache of the
+# real package document + tarball, fetched straight from registry.npmjs.org
+# through Nexus. Warming here means a later offline run finds every approved
+# version already cached. prettier has zero runtime dependencies (the
+# selection guideline in the design doc), so one real "npm install" pulls
+# the whole closure: the package document plus its one tarball.
+log "warming the npm-proxy cache for catalog/prettier"
+python3 - "$(cd "$(dirname "$0")/../.." && pwd)/catalog/prettier/versions.json" <<'PY' > "$WORK/prettier.versions"
+import json, sys
+for rec in json.load(open(sys.argv[1])):
+    print(rec["version"])
+PY
+NPM_WARM=$(mktemp -d)
+while read -r v; do
+  if NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false \
+     npm install -g --prefix "$NPM_WARM/prefix" \
+       --registry "$NEXUS_URL/repository/npm-proxy/" "prettier@$v" >/dev/null 2>&1; then
+    log "prettier $v (package document + tarball) cached at npm-proxy"
+  else
+    echo "ERROR: could not warm npm-proxy cache for prettier $v" >&2
+    exit 1
+  fi
+  rm -rf "$NPM_WARM/prefix"
+done < "$WORK/prettier.versions"
+rm -rf "$NPM_WARM"
+
+# --- pypi-proxy cache warming (pypi-installed tools; catalog/ruff) ---------
+# ruff installs as one dependency-free prebuilt wheel per platform (the
+# selection guideline in the design doc), so a real "pip download" against
+# the proxy — same philosophy as the go closure and npm warming above —
+# pulls both the simple-API page and the one wheel matching this machine's
+# platform, with nothing else to close over.
+log "warming the pypi-proxy cache for catalog/ruff"
+python3 - "$(cd "$(dirname "$0")/../.." && pwd)/catalog/ruff/versions.json" <<'PY' > "$WORK/ruff.versions"
+import json, sys
+for rec in json.load(open(sys.argv[1])):
+    print(rec["version"])
+PY
+PYPI_WARM=$(mktemp -d)
+while read -r v; do
+  if python3 -m pip download --no-deps --no-cache-dir \
+       --index-url "$NEXUS_URL/repository/pypi-proxy/simple" \
+       --trusted-host "$(python3 -c "import urllib.parse,sys; print(urllib.parse.urlparse(sys.argv[1]).hostname)" "$NEXUS_URL")" \
+       -d "$PYPI_WARM/dl" "ruff==$v" >/dev/null 2>&1; then
+    log "ruff $v (simple-API page + wheel) cached at pypi-proxy"
+  else
+    echo "ERROR: could not warm pypi-proxy cache for ruff $v" >&2
+    exit 1
+  fi
+  rm -rf "$PYPI_WARM/dl"
+done < "$WORK/ruff.versions"
+rm -rf "$PYPI_WARM"
 
 log "seed complete; manifest:"
 column -t "$MANIFEST"

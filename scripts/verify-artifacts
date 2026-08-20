@@ -11,13 +11,27 @@ For each catalog/<tool>/versions.json record:
       "go mod download -json" against the same proxy and compare Sum.
       A go tool version with no h1 is a deliberate proxy-trust entry
       (see catalog/<tool>/versions.json); it is reported, not failed.
+  npm tools:
+    - GET the package document at the npm registry and confirm its
+      "versions" map contains the version — missing fails the run.
+      With --checksum there is nothing to compare (npm records carry no
+      checksum); reported as a skip, same as an h1-less go record.
+  pypi tools:
+    - GET the PyPI simple API page (PEP 691 JSON, HTML fallback) and
+      confirm the version is listed — missing fails the run.
+      With --checksum there is nothing to compare either; reported as a
+      skip, same as an h1-less go record.
 
 Auth: curl -n (~/.netrc) plus $NEXUS_CURL_OPTS, same convention as add-version.
 The go proxy fetch is unauthenticated GET, same as any go-proxy client.
+The npm/pypi probes run through the user's environment too (curl honors
+http_proxy; auth rides the same -n/NEXUS_CURL_OPTS convention).
 
 Usage:
   scripts/verify-artifacts [--checksum] [--tool T ...]
-                           [--nexus-url URL] [--goproxy-url URL] [--catalog-dir DIR]
+                           [--nexus-url URL] [--goproxy-url URL]
+                           [--npm-registry-url URL] [--pypi-index-url URL]
+                           [--catalog-dir DIR]
 Exit code 0 = all verified, 1 = any failure.
 """
 import argparse
@@ -28,12 +42,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 H1_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=\Z")
 # Base URLs get the same shape check the plugin applies at install time,
-# so this gate can never pass a URL the runtime would refuse.
+# so this gate can never pass a URL the runtime would refuse. Checked
+# against the registry/index BASE only, never a composed per-package URL —
+# a scoped npm package's "@" is outside this character class on purpose.
 URL_RE = re.compile(r"^https?://[A-Za-z0-9._~:/%+-]+\Z")
 
 
@@ -142,12 +159,248 @@ def go_mod_sum(proxy, module_root, version):
     return sum_, None
 
 
+def npm_config_get(key):
+    """Same convention as scripts/add-version: run "npm config get <key>";
+    return the value or None (unset/missing npm/error). npm prints the
+    literal word "undefined" for an unset key."""
+    if shutil.which("npm") is None:
+        return None
+    try:
+        p = subprocess.run(["npm", "config", "get", key],
+                            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    val = p.stdout.strip()
+    if not val or val.lower() == "undefined":
+        return None
+    return val
+
+
+def npm_registry_url(package, override):
+    """Explicit --npm-registry-url wins outright, matching add-version's
+    precedence for --nexus-url/--goproxy-url."""
+    if override:
+        return override, "explicit --npm-registry-url"
+    if package.startswith("@") and "/" in package:
+        scope = package.split("/", 1)[0]
+        val = npm_config_get(f"{scope}:registry")
+        if val:
+            return val, f"npm config get {scope}:registry"
+    val = npm_config_get("registry")
+    if val:
+        return val, "npm config get registry"
+    return None, None
+
+
+def npm_escape_package(package):
+    if package.startswith("@") and "/" in package:
+        scope, name = package.split("/", 1)
+        return f"{scope}%2F{name}"
+    return package
+
+
+def probe_npm_version(registry, package, version):
+    """GET the package document and check its "versions" map; None means
+    the version exists. A 200 with no usable "versions" map is its own
+    reason, distinct from "version not listed" — never read a malformed
+    response as proof of absence."""
+    url = f"{registry.rstrip('/')}/{npm_escape_package(package)}"
+    r = curl(["-w", "\n%{http_code}", url])
+    if r.returncode != 0:
+        return f"unreachable (curl exit {r.returncode})", url
+    body, _, code = (r.stdout or "").rpartition("\n")
+    if code in ("404", "410"):
+        return f"package not found at the npm registry (HTTP {code})", url
+    if code.startswith("3"):
+        return f"server redirected (HTTP {code}) — redirects are refused", url
+    if code != "200":
+        return f"unexpected HTTP {code}", url
+    try:
+        doc = json.loads(body)
+    except json.JSONDecodeError:
+        return "npm registry response was not valid JSON", url
+    versions_map = doc.get("versions")
+    if not isinstance(versions_map, dict):
+        return "npm registry response has no usable \"versions\" map", url
+    if version in versions_map:
+        return None, url
+    return "version not listed in the npm registry package document", url
+
+
+def pip_config_get(key):
+    """Same convention as scripts/add-version: try "pip config get <key>"
+    then "pip3 config get <key>"; return the value or None. Tolerates
+    either binary being absent."""
+    for binary in ("pip", "pip3"):
+        if shutil.which(binary) is None:
+            continue
+        try:
+            p = subprocess.run([binary, "config", "get", key],
+                                capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if p.returncode == 0:
+            val = p.stdout.strip()
+            if val:
+                return val
+    return None
+
+
+def pip_index_url(override):
+    if override:
+        return override, "explicit --pypi-index-url"
+    val = pip_config_get("global.index-url")
+    if val:
+        return val, "pip config get global.index-url"
+    return None, None
+
+
+# The sdist suffix list is the single source of truth for which archive
+# forms the matchers below can judge; the recognized-extension tuple is
+# derived from it so classification and matching can never disagree.
+# .egg is deliberately unsupported (an obsolete format): a version
+# published only as an egg is reported as an unreadable file list, never
+# as a false absence.
+PYPI_SDIST_SUFFIXES = (".tar.gz", ".tgz", ".zip", ".tar.bz2", ".tar.xz")
+PYPI_FILENAME_EXTENSIONS = PYPI_SDIST_SUFFIXES + (".whl",)
+
+
+def pep503_normalize_underscored(name):
+    """The PEP 625/wheel form of PEP 503 normalization: lowercase, runs of
+    -._ collapsed to a single underscore instead of a hyphen."""
+    return re.sub(r"[-_.]+", "_", name).lower()
+
+
+def pypi_expected_sdist_stems(package, version):
+    """The filename stems (extension already stripped) a valid sdist for
+    the known package name and known target version is allowed to use:
+    the modern PEP 625 form (hyphens replaced by underscores), the legacy
+    form (the raw project name as given), and the fully
+    PEP 503-normalized-with-underscores form. Matched case-insensitively
+    by the caller."""
+    return {
+        f"{package.replace('-', '_')}-{version}".lower(),
+        f"{package}-{version}".lower(),
+        f"{pep503_normalize_underscored(package)}-{version}".lower(),
+    }
+
+
+def pypi_filename_matches_sdist(filename, package, version):
+    """True if filename is a sdist archive for the known package name and
+    known target version. Matches against filenames constructed from that
+    name and version rather than token-splitting the filename itself —
+    splitting on every hyphen misreads a hyphenated project name like
+    "sample-pkg" (the file "sample-pkg-1.2.3.tar.gz" would misparse "pkg"
+    as the version)."""
+    lower = filename.lower()
+    for suffix in PYPI_SDIST_SUFFIXES:
+        if lower.endswith(suffix):
+            return lower[: -len(suffix)] in pypi_expected_sdist_stems(package, version)
+    return False
+
+
+def pypi_filename_matches_wheel(filename, package, version):
+    """True if filename is a wheel for the known package name and known
+    target version. A wheel filename starts with "{distribution}-{version}-",
+    where distribution is the project name with runs of -._ collapsed to a
+    single underscore."""
+    lower = filename.lower()
+    if not lower.endswith(".whl"):
+        return False
+    prefix = f"{pep503_normalize_underscored(package)}-{version}-".lower()
+    return lower.startswith(prefix)
+
+
+def pypi_version_in_filenames(filenames, package, version):
+    """Return (found, checked_any). found is True if any filename in the
+    list is a valid sdist or wheel for the known package name and known
+    target version — both are already known at every call site, since the
+    probe always asks "does version V of package P exist", it never needs
+    to enumerate versions from unfamiliar filenames. checked_any is False
+    when nothing in the list even looked like a package archive filename,
+    so the caller can distinguish "we looked and it is absent" from "this
+    index's file list could not be read" — the latter must never be
+    reported as absence."""
+    checked_any = False
+    for name in filenames:
+        if name.lower().endswith(PYPI_FILENAME_EXTENSIONS):
+            checked_any = True
+        if pypi_filename_matches_sdist(name, package, version) or \
+                pypi_filename_matches_wheel(name, package, version):
+            return True, True
+    return False, checked_any
+
+
+def probe_pypi_version(index, package, version):
+    """GET the simple API page with PEP 691 JSON content negotiation.
+    Preferred: the PEP 700 "versions" list. Fallback for a PEP 691-only
+    JSON index, or an index that answers HTML: derive versions from the
+    listed file names."""
+    url = f"{index.rstrip('/')}/{package}/"
+    accept = "application/vnd.pypi.simple.v1+json, text/html;q=0.1"
+    marker = "\x1e"
+    r = curl(["-H", f"Accept: {accept}",
+              "-w", f"{marker}%{{http_code}}{marker}%{{content_type}}", url])
+    if r.returncode != 0:
+        return f"unreachable (curl exit {r.returncode})", url
+    body, _, rest = (r.stdout or "").partition(marker)
+    code, _, ctype = rest.partition(marker)
+    if code in ("404", "410"):
+        return f"package not found at the PyPI simple index (HTTP {code})", url
+    if code.startswith("3"):
+        return f"server redirected (HTTP {code}) — redirects are refused", url
+    if code != "200":
+        return f"unexpected HTTP {code}", url
+
+    ctype = ctype.split(";")[0].strip().lower()
+    if "json" in ctype:
+        try:
+            doc = json.loads(body)
+        except json.JSONDecodeError:
+            return "PyPI simple index JSON response was not valid JSON", url
+        versions_list = doc.get("versions")
+        if isinstance(versions_list, list):
+            if version in versions_list:
+                return None, url
+            return "version not listed in the PyPI simple index (PEP 700 versions list)", url
+        files = doc.get("files")
+        if not isinstance(files, list):
+            return ("PyPI simple index JSON response has no usable "
+                    "\"versions\" or \"files\" list"), url
+        filenames = [f.get("filename", "") for f in files if isinstance(f, dict)]
+        found, checked_any = pypi_version_in_filenames(filenames, package, version)
+        if not checked_any:
+            return "PyPI simple index JSON file list had no parseable filenames", url
+        if found:
+            return None, url
+        return "version not found among the PyPI simple index's listed files", url
+
+    if "html" in ctype or body.lstrip().lower().startswith(("<!doctype", "<html")):
+        filenames = re.findall(r"<a\b[^>]*>([^<]+)</a>", body, re.IGNORECASE)
+        found, checked_any = pypi_version_in_filenames(filenames, package, version)
+        if not checked_any:
+            return "PyPI simple index HTML response had no parseable file links", url
+        if found:
+            return None, url
+        return "version not found among the PyPI simple index's listed files (HTML)", url
+
+    return f"PyPI simple index returned an unrecognized content type ({ctype or 'none'})", url
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checksum", action="store_true", help="download and verify sha256")
     ap.add_argument("--tool", action="append", help="restrict to these tools")
     ap.add_argument("--nexus-url")
     ap.add_argument("--goproxy-url")
+    ap.add_argument("--npm-registry-url",
+                    help="npm tools only: explicit override; else npm config get "
+                         "[@scope:]registry")
+    ap.add_argument("--pypi-index-url",
+                    help="pypi tools only: explicit override; else pip config get "
+                         "global.index-url")
     ap.add_argument("--catalog-dir", default=str(REPO / "catalog"))
     args = ap.parse_args()
 
@@ -162,7 +415,7 @@ def main():
 
     failures = 0
     checked = 0
-    skipped = 0
+    skip_reasons = Counter()
     catalog = Path(args.catalog_dir)
     if args.tool:
         known = {p.name for p in catalog.iterdir() if p.is_dir()}
@@ -222,7 +475,7 @@ def main():
                 if "h1" not in rec:
                     print(f"skip sum check: {tool_name} {rec['version']} carries no h1 "
                           f"(proxy-trust entry — nothing to compare against)")
-                    skipped += 1
+                    skip_reasons["go proxy-trust versions with no h1"] += 1
                     continue
                 sum_, reason = go_mod_sum(goproxy, module_root, rec["version"])
                 if sum_ is None:
@@ -234,6 +487,52 @@ def main():
                     failures += 1
                 else:
                     print(f"ok   h1:      {tool_name} {rec['version']}")
+            continue
+
+        if tool.get("type") == "npm":
+            package = tool.get("package", "")
+            registry, _source = npm_registry_url(package, args.npm_registry_url)
+            if not registry:
+                sys.exit("error: no npm registry URL (pass --npm-registry-url, or configure "
+                         "npm: 'npm config set registry <url>')")
+            if not URL_RE.match(registry):
+                sys.exit(f"error: refusing unsafe npm registry URL: {registry!r}")
+            for rec in versions:
+                checked += 1
+                reason, url = probe_npm_version(registry, package, rec["version"])
+                if reason is not None:
+                    print(f"FAIL {reason}: {url}")
+                    failures += 1
+                    continue
+                if not args.checksum:
+                    print(f"ok   exists:  {tool_name} {rec['version']} (npm registry)")
+                    continue
+                print(f"skip sum check: {tool_name} {rec['version']} carries no checksum "
+                      f"(npm is version-pin only — nothing to compare against)")
+                skip_reasons["npm/pypi records are version-pin only (no checksum to compare)"] += 1
+            continue
+
+        if tool.get("type") == "pypi":
+            package = tool.get("package", "")
+            index, _source = pip_index_url(args.pypi_index_url)
+            if not index:
+                sys.exit("error: no PyPI index URL (pass --pypi-index-url, or configure pip: "
+                         "'pip config set global.index-url <url>')")
+            if not URL_RE.match(index):
+                sys.exit(f"error: refusing unsafe PyPI index URL: {index!r}")
+            for rec in versions:
+                checked += 1
+                reason, url = probe_pypi_version(index, package, rec["version"])
+                if reason is not None:
+                    print(f"FAIL {reason}: {url}")
+                    failures += 1
+                    continue
+                if not args.checksum:
+                    print(f"ok   exists:  {tool_name} {rec['version']} (PyPI simple index)")
+                    continue
+                print(f"skip sum check: {tool_name} {rec['version']} carries no checksum "
+                      f"(pypi is version-pin only — nothing to compare against)")
+                skip_reasons["npm/pypi records are version-pin only (no checksum to compare)"] += 1
             continue
 
         if not nexus:
@@ -271,8 +570,10 @@ def main():
                         print(f"ok   sha256:  {tool_name} {rec['version']} {plat}")
 
     mode = "existence+checksum" if args.checksum else "existence"
-    if skipped:
-        mode += f", {skipped} skipped (proxy-trust go versions with no h1)"
+    total_skipped = sum(skip_reasons.values())
+    if total_skipped:
+        detail = "; ".join(f"{n} {reason}" for reason, n in skip_reasons.items())
+        mode += f", {total_skipped} skipped ({detail})"
     if checked == 0:
         print("verify-artifacts: FAILED — the selection matched no artifacts", file=sys.stderr)
         return 1

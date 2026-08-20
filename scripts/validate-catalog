@@ -12,12 +12,18 @@ Schemas in schemas/ plus cross-file rules the schemas cannot express:
   - artifact templates must be plain file names (no path separators or
     shell metacharacters); bin paths must be relative and free of '..'
   - an artifact-type tool (archive/binary/runtime) must have platform-shaped
-    version entries; a go-type tool must have go-shaped version entries
-    (a version entry never mixes "platforms" and "h1")
+    version entries; a go/npm/pypi-type tool must have version entries
+    shaped for that same ecosystem (its own version grammar, no other
+    fields) — a JSON Schema alone cannot tell these apart, since a bare
+    version-only record can satisfy more than one ecosystem's envelope at
+    once, so this dispatch is cross-file only, keyed on tool.json's type
   - a go tool's module must end in the tool name (go install names the
     binary after the module path's last element)
   - a go tool's module_root, when present, must be a prefix of module
     (equal to it, or a parent path of it)
+  - an npm/pypi tool's optional "bin" field, when absent, requires the
+    tool name itself to satisfy the bin grammar (in particular its
+    64-character cap), since bin defaults to the tool name
 
 The dep-free built-in checks always run; when the `jsonschema` package is
 available (CI), the formal schemas in schemas/ are validated on top of them.
@@ -63,6 +69,32 @@ MODULE_RE = re.compile(
 # literally, and an uppercase version would need go-proxy escaping there.
 GO_VERSION_RE = re.compile(r"^[0-9][a-z0-9.+_-]*\Z")
 H1_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=\Z")
+# npm package name: an optional "@scope/" prefix, then lowercase
+# [a-z0-9._-] segments. The "/" is the only path separator allowed
+# anywhere in the value, and only as the single scope separator; npm's
+# own 214-character cap is checked alongside the pattern.
+# Lowercase-only and narrower than npm's own rules: a shell-safety
+# envelope, not a full syntax validator.
+NPM_PACKAGE_RE = re.compile(r"^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*\Z")
+# PyPI package name: the PEP 503 normalized form only (lowercase letters,
+# digits, and single hyphens between segments). The catalog stores only
+# the normalized form; scripts/add-version refuses a non-normalized input.
+PYPI_PACKAGE_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
+# Shared "bin" field: the executable name the plugin verifies exists and
+# exposes on PATH after an npm/pypi (or future cargo) install. It becomes
+# part of a filesystem path, so the grammar is narrow and shell-safe.
+BIN_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}\Z")
+# Lowercase semver envelope shared by npm and cargo versions. Deliberately
+# does not enforce semver's leading-zero or empty-identifier rules, and
+# does not accept uppercase (npm/cargo prerelease segments may legally
+# contain uppercase, e.g. "1.0.0-RC.1", but such versions cannot be
+# approved as-is) — scripts/add-version's registry probe is the real check.
+SEMVER_ENVELOPE_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?(\+[0-9a-z.-]+)?\Z")
+# PEP 440 envelope for PyPI versions, covering the common shapes only;
+# epochs and legacy version forms are deliberately not representable.
+PEP440_ENVELOPE_RE = re.compile(
+    r"^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?"
+    r"(\+[0-9a-z]+(\.[0-9a-z]+)*)?\Z")
 
 errors = []
 
@@ -119,11 +151,69 @@ def builtin_validate_go_tool(tool, path):
         err(path, "env must be an object of string values")
 
 
+def _validate_bin_field(tool, path):
+    """Shared by npm/pypi: "bin" is optional and defaults to the tool name.
+    When absent, the tool name itself must satisfy the bin grammar (in
+    particular its 64-character cap) since it is what gets used —
+    catching this here means a catalog entry that would fail only at
+    install time is instead rejected up front."""
+    if "bin" in tool:
+        bin_name = tool.get("bin")
+        if not isinstance(bin_name, str) or not BIN_NAME_RE.match(bin_name):
+            err(path, f"invalid bin: {bin_name!r}")
+    elif "name" in tool and isinstance(tool["name"], str) and not BIN_NAME_RE.match(tool["name"]):
+        err(path, f"name {tool['name']!r} is longer than the 64-character bin-name cap "
+                  f"that the default (bin = name) must satisfy; add an explicit 'bin' field")
+
+
+def builtin_validate_npm_tool(tool, path):
+    for key in ("name", "type", "package"):
+        if key not in tool:
+            err(path, f"missing required field '{key}'")
+    unknown = set(tool) - {"name", "type", "package", "bin", "env"}
+    if unknown:
+        err(path, f"unknown fields: {sorted(unknown)}")
+    if "name" in tool and not NAME_RE.match(str(tool["name"])):
+        err(path, f"invalid name: {tool['name']!r}")
+    if "package" in tool:
+        package = tool.get("package")
+        if not isinstance(package, str) or len(package) > 214 or not NPM_PACKAGE_RE.match(package):
+            err(path, f"invalid npm package name: {package!r}")
+    _validate_bin_field(tool, path)
+    env = tool.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        err(path, "env must be an object of string values")
+
+
+def builtin_validate_pypi_tool(tool, path):
+    for key in ("name", "type", "package"):
+        if key not in tool:
+            err(path, f"missing required field '{key}'")
+    unknown = set(tool) - {"name", "type", "package", "bin", "env"}
+    if unknown:
+        err(path, f"unknown fields: {sorted(unknown)}")
+    if "name" in tool and not NAME_RE.match(str(tool["name"])):
+        err(path, f"invalid name: {tool['name']!r}")
+    if "package" in tool:
+        package = tool.get("package")
+        if not isinstance(package, str) or not PYPI_PACKAGE_RE.match(package):
+            err(path, f"invalid PyPI package name (expected the PEP 503 normalized "
+                      f"form): {package!r}")
+    _validate_bin_field(tool, path)
+    env = tool.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        err(path, "env must be an object of string values")
+
+
 def builtin_validate_tool(tool, path):
     if not isinstance(tool, dict):
         return err(path, "must be a JSON object")
     if tool.get("type") == "go":
         return builtin_validate_go_tool(tool, path)
+    if tool.get("type") == "npm":
+        return builtin_validate_npm_tool(tool, path)
+    if tool.get("type") == "pypi":
+        return builtin_validate_pypi_tool(tool, path)
     for key in ("name", "type", "platforms"):
         if key not in tool:
             err(path, f"missing required field '{key}'")
@@ -183,6 +273,26 @@ def builtin_validate_go_version_rec(rec, where, path):
             err(path, f"{where}: invalid h1: {h1!r} (expected h1:<43 base64 chars>=)")
 
 
+def builtin_validate_npm_version_rec(rec, where, path):
+    unknown = set(rec) - {"version"}
+    if unknown:
+        err(path, f"{where}: unknown fields: {sorted(unknown)}")
+    v = rec.get("version")
+    if not isinstance(v, str) or not SEMVER_ENVELOPE_RE.match(v):
+        err(path, f"{where}: invalid npm tool version: {v!r} "
+                  f"(expected a lowercase semver envelope)")
+
+
+def builtin_validate_pypi_version_rec(rec, where, path):
+    unknown = set(rec) - {"version"}
+    if unknown:
+        err(path, f"{where}: unknown fields: {sorted(unknown)}")
+    v = rec.get("version")
+    if not isinstance(v, str) or not PEP440_ENVELOPE_RE.match(v):
+        err(path, f"{where}: invalid PyPI tool version: {v!r} "
+                  f"(expected a PEP 440 envelope)")
+
+
 def builtin_validate_versions(versions, path, tool_type=None):
     if not isinstance(versions, list):
         return err(path, "must be a JSON ARRAY (ordered, oldest-approved first)")
@@ -194,6 +304,12 @@ def builtin_validate_versions(versions, path, tool_type=None):
             continue
         if is_go:
             builtin_validate_go_version_rec(rec, where, path)
+            continue
+        if tool_type == "npm":
+            builtin_validate_npm_version_rec(rec, where, path)
+            continue
+        if tool_type == "pypi":
+            builtin_validate_pypi_version_rec(rec, where, path)
             continue
         unknown = set(rec) - {"version", "platforms"}
         if unknown:

@@ -1,0 +1,5 @@
+{
+  "name": "evil",
+  "type": "npm",
+  "package": "evil$(rm -rf /)"
+}
