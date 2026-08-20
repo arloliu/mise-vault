@@ -205,5 +205,48 @@ while read -r v; do
 done < "$WORK/ruff.versions"
 rm -rf "$PYPI_WARM"
 
+# --- cargo-proxy cache warming (cargo-installed tools; catalog/tokei) ------
+# Same philosophy as the go-proxy/npm-proxy/pypi-proxy warming above: a
+# cargo tool has no Nexus artifact to upload, its content is the cargo proxy
+# repository's cache of the sparse index plus the crate tarballs it proxies,
+# fetched straight from index.crates.io through Nexus. Unlike npm/pypi,
+# cargo's --locked build pulls its ENTIRE dependency tree (the crate's
+# committed Cargo.lock), so a real "cargo install --locked" against the
+# proxy, from a scratch CARGO_HOME that source-replaces crates-io with the
+# Nexus cargo proxy, is the only reliable way to pull the full closure
+# through — mirroring the go-proxy warming's reasoning exactly.
+log "warming the cargo-proxy cache for catalog/tokei"
+python3 - "$(cd "$(dirname "$0")/../.." && pwd)/catalog/tokei/versions.json" <<'PY' > "$WORK/tokei.versions"
+import json, sys
+for rec in json.load(open(sys.argv[1])):
+    print(rec["version"])
+PY
+command -v cargo >/dev/null 2>&1 || {
+  echo "ERROR: warming the cargo-proxy cache needs a Rust toolchain (cargo) on PATH" >&2
+  exit 1
+}
+CARGO_WARM=$(mktemp -d)
+mkdir -p "$CARGO_WARM/home"
+cat > "$CARGO_WARM/home/config.toml" <<EOF
+[source.crates-io]
+replace-with = "nexus-cargo"
+
+[registries.nexus-cargo]
+index = "sparse+$NEXUS_URL/repository/cargo-proxy/"
+EOF
+while read -r v; do
+  # RUSTUP_AUTO_INSTALL=0 mirrors the plugin's own pin: a rustup-provided
+  # cargo must never reach for a toolchain download while seeding.
+  if RUSTUP_AUTO_INSTALL=0 CARGO_HOME="$CARGO_WARM/home" CARGO_NET_RETRY=1 \
+     cargo install tokei --version "$v" --locked --root "$CARGO_WARM/install" >/dev/null 2>&1; then
+    log "tokei $v and its full dependency closure cached at cargo-proxy"
+  else
+    echo "ERROR: could not warm cargo-proxy cache for tokei $v" >&2
+    exit 1
+  fi
+  rm -rf "$CARGO_WARM/install"
+done < "$WORK/tokei.versions"
+rm -rf "$CARGO_WARM"
+
 log "seed complete; manifest:"
 column -t "$MANIFEST"

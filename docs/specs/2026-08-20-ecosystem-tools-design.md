@@ -1,6 +1,9 @@
 # Ecosystem tool types: cargo, npm, pypi — design
 
-Status: APPROVED 2026-08-20, not yet implemented.
+Status: APPROVED 2026-08-20.
+Phases A (npm + pypi) and B (cargo) are implemented;
+see the implementation notes at the end of this document.
+Phase C (the bun runner) remains future work.
 Amended later the same day
 after reviewing the real private-network registry configuration:
 pipx became the default pypi runner,
@@ -578,3 +581,61 @@ those variables provide only hold on a sufficiently recent pipx.
 The plugin sets all of them regardless, since they are
 forward-compatible and an old pipx just ignores what it does not
 recognize.
+
+## Implementation notes (Phase B, 2026-08-20)
+
+Phase B (cargo) landed against this spec.
+tokei 14.0.0 is the seeded example — the latest stable, non-yanked
+release on crates.io at approval time.
+Full detail is recorded in `docs/research/SYNTHESIS.md` (entry 21);
+this note is the short version pinned to the spec that motivated each
+point.
+
+1. **`require_runner`'s error message gained a second, cargo-specific
+   sentence.**
+   Section 4 already specifies that the runner-missing message names
+   the fix ("install \<runner\> and ensure it is on PATH").
+   For cargo, a bare "cargo not found" would send an operator looking
+   for the wrong fix, since cargo installs compile from source: the
+   hook now also names the Rust-toolchain-and-C-linker requirement up
+   front, in the same message, before the operator goes looking.
+2. **A yanked crate version is refused at approval time, not installed
+   and then discovered broken.**
+   The section 7 probe convention ("GET only, refuse redirects, always
+   check the HTTP status code, treat 404 and 410 as absent") is
+   extended, not replaced: a sparse-index line whose `vers` matches but
+   whose `yanked` field is `true` is treated exactly like a missing
+   line.
+   This was not spelled out in section 7 because the sparse index
+   format itself was not yet confirmed at spec time; crates.io's own
+   `cargo install` already refuses a yanked version, so refusing it
+   before it ever reaches `versions.json` keeps the catalog's
+   fail-closed posture aligned with the registry's, rather than
+   deferring the failure to a developer's `mise install`.
+3. **`~/.cargo/config.toml` parsing choices, resolving the one thing
+   section 4's index-resolution sketch left implicit.**
+   `$CARGO_HOME/config.toml` replaces `~/.cargo/config.toml` outright
+   when `CARGO_HOME` is set — matching cargo's own `CARGO_HOME`
+   precedence exactly, not layering the two.
+   Absence of `[source.crates-io]` `replace-with` in the resolved file
+   is not an error: it means the default public sparse index legitimately
+   applies, mirroring cargo's own default when nothing overrides it.
+   A `replace-with` that names a registry with no matching
+   `[registries.<name>]` `index` IS an error — a hard abort naming the
+   fix, never a silent fallback to the public index — because a broken
+   redirect resolving to "try the public internet instead" is exactly
+   the fallback this project forbids, even though an absent
+   `replace-with` legitimately reaches the same public index by
+   default.
+4. **Nexus CE supports the cargo proxy repository format, resolving
+   section 8's open item.**
+   Section 8 left this as a research-time unknown ("what remains is
+   confirming that the experiment stack's Nexus CE version supports it
+   too" — with an online-only fallback plan if not).
+   Verified empirically against Nexus CE 3.95.1: a `cargo/proxy`
+   repository proxying `https://index.crates.io` serves the standard
+   sparse index layout directly under the repository root, and its
+   `config.json` `dl` field routes crate tarball downloads through the
+   same proxy, so the fallback plan was never needed — the cargo case
+   runs end-to-end through the experiment Nexus and joins the offline
+   gate unconditionally, the same as npm and pypi.

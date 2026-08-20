@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # Regression coverage for scripts/approve's preflight and failure-message
-# behavior, plus scripts/add-version's own npm/pypi checks that approve's
-# generic preflight cannot perform (ecosystem version-envelope grammar,
-# PyPI normalization, and registry-probe existence). No network reachable
-# to a real Nexus/npm-registry/PyPI-index is needed anywhere in this file:
-# preflight rejections never reach add-version, the two failure-message
-# cases point --nexus-url at an unreachable local port so add-version
-# fails fast, and the npm/pypi probe cases run a throwaway local HTTP
-# server that answers exactly like the real registry/index would for the
-# scenario under test.
+# behavior, plus scripts/add-version's own npm/pypi/cargo checks that
+# approve's generic preflight cannot perform (ecosystem version-envelope
+# grammar, PyPI normalization, and registry-probe existence). No network
+# reachable to a real Nexus/npm-registry/PyPI-index/cargo-index is needed
+# anywhere in this file: preflight rejections never reach add-version, the
+# two failure-message cases point --nexus-url at an unreachable local port
+# so add-version fails fast, and the npm/pypi/cargo probe cases run a
+# throwaway local HTTP server that answers exactly like the real
+# registry/index would for the scenario under test.
 #
 # Every preflight-rejection case is asserted four ways: the process exit
 # code, that the catalog copy under test is byte-for-byte unchanged
@@ -20,7 +20,7 @@
 # artifact probe against the unreachable Nexus URL), which would make the
 # test pass for the wrong reason.
 #
-# The npm/pypi add-version cases below are asserted three ways instead
+# The npm/pypi/cargo add-version cases below are asserted three ways instead
 # (exit code, catalog unchanged, diagnostic present): they call
 # scripts/add-version directly, since their checks (version-envelope
 # grammar, PyPI normalization, registry probe) live inside add-version
@@ -30,6 +30,7 @@ import http.client
 import http.server
 import importlib.machinery
 import importlib.util
+import os
 import shutil
 import sys
 import tempfile
@@ -216,6 +217,36 @@ def assert_rejected(desc, specs, tmp_root, expect_diagnostic):
             detail="a preflight rejection must never reach add-version")
 
 
+@contextmanager
+def cargo_env(home=None, cargo_home=None):
+    """Isolate HOME and CARGO_HOME for one in-process cargo_config_index_url()
+    call. These are direct calls into the loaded module (not a subprocess),
+    so os.environ itself is the thing under test here -- it is saved and
+    restored around each case rather than passed as a child-process
+    environment. CARGO_HOME is always cleared first so a case that omits it
+    never inherits the real one from the test runner's own environment."""
+    saved = dict(os.environ)
+    try:
+        os.environ.pop("CARGO_HOME", None)
+        if home is not None:
+            os.environ["HOME"] = home
+        if cargo_home is not None:
+            os.environ["CARGO_HOME"] = cargo_home
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def write_cargo_config(config_dir, text):
+    """Write a cargo config.toml directly into config_dir (a $HOME/.cargo
+    directory or a $CARGO_HOME directory -- cargo_config_index_url() reads
+    "<config_dir>/config.toml" either way)."""
+    config_dir = Path(config_dir)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(text)
+
+
 # --- direct in-process check that scripts/add-version's and
 # scripts/verify-artifacts' copies of the PyPI filename-matching helper
 # behave identically, not just read identically. Everything else in this
@@ -246,6 +277,168 @@ for mod_name, mod in (("add-version", add_version_mod), ("verify-artifacts", ver
             fn(["sample-pkg-9.9.9.tar.xz"], "sample-pkg", "1.2.3") == (False, True))
     s.check(f"{mod_name}: an egg-only file list is unreadable, never a false absence",
             fn(["sample_pkg-1.2.3-py2.7.egg"], "sample-pkg", "1.2.3") == (False, False))
+
+    # --- direct in-process check that scripts/add-version's and
+    # scripts/verify-artifacts' copies of the cargo index helpers behave
+    # identically, not just read identically -- same reasoning as the PyPI
+    # check above. ---
+    s.check(f"{mod_name}: cargo_crate_index_relpath 1-char name",
+            mod.cargo_crate_index_relpath("a") == "1/a")
+    s.check(f"{mod_name}: cargo_crate_index_relpath 2-char name",
+            mod.cargo_crate_index_relpath("ab") == "2/ab")
+    s.check(f"{mod_name}: cargo_crate_index_relpath 3-char name",
+            mod.cargo_crate_index_relpath("abc") == "3/a/abc")
+    s.check(f"{mod_name}: cargo_crate_index_relpath long name",
+            mod.cargo_crate_index_relpath("tokei") == "to/ke/tokei")
+    s.check(f"{mod_name}: cargo_normalize_index_url strips the sparse+ marker",
+            mod.cargo_normalize_index_url("sparse+https://index.crates.io/", "x")
+            == "https://index.crates.io/")
+    try:
+        mod.cargo_normalize_index_url("git+https://example.com/crates.io-index", "x")
+        s.check(f"{mod_name}: cargo_normalize_index_url rejects a git-index registry", False)
+    except ValueError as e:
+        s.check(f"{mod_name}: cargo_normalize_index_url rejects a git-index registry",
+                "sparse+http(s)" in str(e))
+    cargo_body = ('{"name":"tokei","vers":"13.0.0","yanked":false}\n'
+                  '{"name":"tokei","vers":"14.0.0","yanked":false}\n'
+                  '{"name":"tokei","vers":"9.9.9","yanked":true}\n')
+    s.check(f"{mod_name}: cargo_version_in_lines finds a present version",
+            mod.cargo_version_in_lines(cargo_body, "14.0.0") == (True, True))
+    s.check(f"{mod_name}: cargo_version_in_lines treats a yanked version as absent",
+            mod.cargo_version_in_lines(cargo_body, "9.9.9") == (False, True))
+    s.check(f"{mod_name}: cargo_version_in_lines reports absence for an unlisted version",
+            mod.cargo_version_in_lines(cargo_body, "1.1.1") == (False, True))
+    s.check(f"{mod_name}: cargo_version_in_lines reports checked_any=False for an "
+            f"unparseable body",
+            mod.cargo_version_in_lines("not json\nnope", "1.1.1") == (False, False))
+
+    # --- direct in-process check of cargo_config_index_url() / cargo_index_url()
+    # precedence and error branches. Every subprocess probe case above (and
+    # below) passes --cargo-index-url explicitly, so none of them ever reaches
+    # config-file resolution at all; this is the only place that does,
+    # including the P0 empty-replace-with regression. ---
+    with tempfile.TemporaryDirectory(prefix="cargo-config-tests.") as cfg_tmp:
+        no_config_home = str(Path(cfg_tmp) / "no-config-home")
+        Path(no_config_home).mkdir()
+        with cargo_env(home=no_config_home):
+            s.check(f"{mod_name}: cargo_config_index_url: no config file at all "
+                    f"-> (None, None)",
+                    mod.cargo_config_index_url() == (None, None))
+            url, source = mod.cargo_index_url(None)
+            s.check(f"{mod_name}: cargo_index_url: no config file at all "
+                    f"-> public default",
+                    (url, source) == ("https://index.crates.io/", "default (index.crates.io)"))
+
+        no_replace_home = str(Path(cfg_tmp) / "no-replace-home")
+        write_cargo_config(Path(no_replace_home) / ".cargo",
+                            '[source.crates-io]\n')
+        with cargo_env(home=no_replace_home):
+            s.check(f"{mod_name}: cargo_config_index_url: [source.crates-io] "
+                    f"present with no replace-with key -> (None, None)",
+                    mod.cargo_config_index_url() == (None, None))
+            url, source = mod.cargo_index_url(None)
+            s.check(f"{mod_name}: cargo_index_url: no replace-with key "
+                    f"-> public default",
+                    (url, source) == ("https://index.crates.io/", "default (index.crates.io)"))
+
+        resolvable_home = str(Path(cfg_tmp) / "resolvable-home")
+        write_cargo_config(Path(resolvable_home) / ".cargo",
+                            '[source.crates-io]\n'
+                            'replace-with = "mycorp"\n'
+                            '\n'
+                            '[registries.mycorp]\n'
+                            'index = "sparse+https://mycorp.example/index/"\n')
+        with cargo_env(home=resolvable_home):
+            index, source = mod.cargo_config_index_url()
+            s.check(f"{mod_name}: cargo_config_index_url: resolvable replace-with "
+                    f"-> its registry index",
+                    index == "sparse+https://mycorp.example/index/"
+                    and "replace-with = 'mycorp'" in source)
+            url, source = mod.cargo_index_url(None)
+            s.check(f"{mod_name}: cargo_index_url: resolvable replace-with wins "
+                    f"over the public default",
+                    url == "https://mycorp.example/index/")
+
+        empty_home = str(Path(cfg_tmp) / "empty-replace-home")
+        write_cargo_config(Path(empty_home) / ".cargo",
+                            '[source.crates-io]\n'
+                            'replace-with = ""\n')
+        with cargo_env(home=empty_home):
+            try:
+                mod.cargo_config_index_url()
+                s.check(f"{mod_name}: cargo_config_index_url: empty replace-with "
+                        f"is a hard error, not the public default (P0)", False)
+            except ValueError as e:
+                s.check(f"{mod_name}: cargo_config_index_url: empty replace-with "
+                        f"is a hard error, not the public default (P0)",
+                        "not a usable registry name" in str(e))
+            try:
+                mod.cargo_index_url(None)
+                s.check(f"{mod_name}: cargo_index_url: empty replace-with never "
+                        f"falls back to crates.io (P0)", False)
+            except ValueError:
+                s.check(f"{mod_name}: cargo_index_url: empty replace-with never "
+                        f"falls back to crates.io (P0)", True)
+
+        ghost_home = str(Path(cfg_tmp) / "ghost-registry-home")
+        write_cargo_config(Path(ghost_home) / ".cargo",
+                            '[source.crates-io]\n'
+                            'replace-with = "ghost"\n')
+        with cargo_env(home=ghost_home):
+            try:
+                mod.cargo_config_index_url()
+                s.check(f"{mod_name}: cargo_config_index_url: replace-with names "
+                        f"a registry with no index -> hard error", False)
+            except ValueError as e:
+                s.check(f"{mod_name}: cargo_config_index_url: replace-with names "
+                        f"a registry with no index -> hard error",
+                        "no [registries.ghost] index" in str(e))
+
+        home_with_config = str(Path(cfg_tmp) / "home-side")
+        write_cargo_config(Path(home_with_config) / ".cargo",
+                            '[source.crates-io]\n'
+                            'replace-with = "homecorp"\n'
+                            '\n'
+                            '[registries.homecorp]\n'
+                            'index = "sparse+https://home.example/index/"\n')
+        cargo_home_dir = str(Path(cfg_tmp) / "cargo-home-side")
+        write_cargo_config(cargo_home_dir,
+                            '[source.crates-io]\n'
+                            'replace-with = "envcorp"\n'
+                            '\n'
+                            '[registries.envcorp]\n'
+                            'index = "sparse+https://env.example/index/"\n')
+        with cargo_env(home=home_with_config, cargo_home=cargo_home_dir):
+            index, _source = mod.cargo_config_index_url()
+            s.check(f"{mod_name}: cargo_config_index_url: CARGO_HOME's "
+                    f"config.toml wins over ~/.cargo outright",
+                    index == "sparse+https://env.example/index/")
+
+        with cargo_env(home=resolvable_home):
+            url, source = mod.cargo_index_url("sparse+https://override.example/index/")
+            s.check(f"{mod_name}: cargo_index_url: explicit override beats a "
+                    f"resolvable config",
+                    (url, source) == ("https://override.example/index/",
+                                       "explicit --cargo-index-url"))
+
+
+def shared_cargo_block(path):
+    """Extract the text between the "Shared cargo helpers" delimiter
+    comments (see scripts/add-version and scripts/verify-artifacts), so
+    parity between the two copies is proven by a test instead of only by
+    the source comment that asks for it."""
+    start_marker = "# --- Shared cargo helpers:"
+    end_marker = "# --- end shared cargo helpers ---"
+    text = Path(path).read_text()
+    start = text.index(start_marker)
+    end = text.index(end_marker, start) + len(end_marker)
+    return text[start:end]
+
+
+s.check("scripts/add-version and scripts/verify-artifacts: shared cargo "
+        "block is byte-for-byte identical",
+        shared_cargo_block(ADD_VERSION) == shared_cargo_block(VERIFY_ARTIFACTS))
+
 
 with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
     assert_rejected("malformed spec", "badspec", tmp, "malformed spec")
@@ -432,5 +625,64 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
             "pypi probe: redirect refused", "ruff", "1.0.0", tmp,
             "redirects are refused",
             extra_argv=["--pypi-index-url", "http://127.0.0.1:18465"])
+
+    # --- approve preflight: a cargo tool goes through the same generic
+    # checks as any other tool (an already-approved version is a preflight
+    # rejection regardless of type) ---
+    assert_rejected("cargo tool: already-approved version", "tokei@14.0.0", tmp,
+                     "already in catalog")
+
+    # --- add-version: cargo version-envelope grammar (checked inside
+    # add-version itself, before any registry is contacted -- no mock
+    # server needed) ---
+    assert_add_version_rejected(
+        "cargo version grammar: uppercase prerelease", "tokei", "14.0.0-RC.1", tmp,
+        "does not match the cargo version envelope")
+
+    # --- add-version: a git-index registry is refused by name, without
+    # contacting any network -- the sparse+ requirement is checked before
+    # the URL is ever used. ---
+    assert_add_version_rejected(
+        "cargo index: git-index registry rejected", "tokei", "9.9.8", tmp,
+        "only a sparse+http(s):// index is supported",
+        extra_argv=["--cargo-index-url", "git+https://github.com/rust-lang/crates.io-index"])
+
+    # --- add-version: cargo registry probes, against a throwaway local
+    # HTTP server standing in for the real sparse index (crates.io index
+    # files are JSON lines served as plain text, not a JSON content type,
+    # so the mock does the same -- the cargo probe never branches on
+    # content type the way the PyPI probe does). Every --cargo-index-url
+    # below carries the "sparse+" marker: this also proves add-version
+    # strips it before building the request, since the mock server only
+    # ever sees a plain http:// connection. ---
+    with fixed_response_server(
+            18472, '{"name":"tokei","vers":"1.0.0","yanked":false}\n',
+            content_type="text/plain") as index:
+        assert_add_version_rejected(
+            "cargo probe: version not in the sparse index", "tokei", "99.99.99", tmp,
+            "version not listed in the cargo index (or listed only as yanked)",
+            extra_argv=["--cargo-index-url", f"sparse+{index}"])
+
+    with fixed_response_server(
+            18473, '{"name":"tokei","vers":"9.9.9","yanked":true}\n',
+            content_type="text/plain") as index:
+        assert_add_version_rejected(
+            "cargo probe: yanked version treated as absent", "tokei", "9.9.9", tmp,
+            "version not listed in the cargo index (or listed only as yanked)",
+            extra_argv=["--cargo-index-url", f"sparse+{index}"])
+
+    with fixed_response_server(
+            18475, '{"name":"tokei","vers":"9.9.6","yanked":false}\n',
+            content_type="text/plain") as index:
+        assert_add_version_accepted(
+            "cargo probe: sparse+ prefix stripped, version found", "tokei", "9.9.6", tmp,
+            extra_argv=["--cargo-index-url", f"sparse+{index}"])
+
+    log = str(Path(tmp) / "cargo-redirect.log")
+    with servers.redirect_server(18474, "http://127.0.0.2:1", log):
+        assert_add_version_rejected(
+            "cargo probe: redirect refused", "tokei", "9.9.7", tmp,
+            "redirects are refused",
+            extra_argv=["--cargo-index-url", "sparse+http://127.0.0.1:18474"])
 
 sys.exit(s.finish())

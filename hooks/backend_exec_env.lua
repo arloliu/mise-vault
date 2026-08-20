@@ -10,8 +10,8 @@ function PLUGIN:BackendExecEnv(ctx)
 
     -- Types built by their own ecosystem's installer rather than unpacked
     -- from a Nexus artifact; the binary always lands in install_path/bin
-    -- (see hooks/backend_install.lua). cargo joins this set in a later phase.
-    local SOURCE_BUILT_TYPES = { go = true, npm = true, pypi = true }
+    -- (see hooks/backend_install.lua).
+    local SOURCE_BUILT_TYPES = { go = true, npm = true, pypi = true, cargo = true }
 
     if SOURCE_BUILT_TYPES[tool.type] then
         table.insert(env_vars, { key = "PATH", value = file.join_path(ctx.install_path, "bin") })

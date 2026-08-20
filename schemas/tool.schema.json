@@ -154,6 +154,38 @@
           "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
         }
       }
+    },
+    {
+      "title": "crate installed via the cargo ecosystem's package manager",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "crate"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*(?![\\s\\S])",
+          "description": "Tool name; must equal the catalog directory name"
+        },
+        "type": {
+          "const": "cargo",
+          "description": "Installed by running 'cargo install <crate> --version <version> --locked --root <install_path>' against the user's own cargo registry configuration; the Rust toolchain, C linker, and their network path are the user's responsibility, not the plugin's"
+        },
+        "crate": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}(?![\\s\\S])",
+          "description": "crates.io crate name: an alphabetic first character, then lowercase letters, digits, underscore, and hyphen, capped at crates.io's own 64-character limit. Lowercase only and narrower than crates.io's own rules: a shell-safety envelope, not a full syntax validator — a value can match here and still not exist in the registry"
+        },
+        "bin": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}(?![\\s\\S])",
+          "description": "Executable name the plugin verifies exists after install and exposes on PATH; defaults to the tool name when absent. An expectation, not an instruction: cargo decides what binary names it writes, the plugin never renames anything"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra env vars for BackendExecEnv; {install_path}/{version} substituted"
+        }
+      }
     }
   ]
 }

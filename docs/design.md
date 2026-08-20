@@ -3,7 +3,8 @@
 Status: living document.
 This started as the initial design proposal and has been amended
 after the research and proof-of-concept phases (2026-08-18),
-then again after Phase A of the ecosystem tool types landed (2026-08-20).
+then again after Phase A and Phase B of the ecosystem tool types
+landed (2026-08-20).
 Evidence and the numbered decision log live in [research/SYNTHESIS.md](research/SYNTHESIS.md);
 this document states the resulting rules in plain language.
 
@@ -72,8 +73,23 @@ this document states the resulting rules in plain language.
     boundary, the same role it already plays for an `h1`-less go
     record.
     Routing is unchanged (`vault:<tool>`, package name in `tool.json`).
-    cargo (Phase B) and a bun runner (Phase C) are planned to follow
-    the same pattern.
+    cargo (Phase B, item 11 below) followed the same pattern; a bun
+    runner (Phase C) remains planned.
+11. **A third ecosystem tool type landed: cargo (Phase B of the
+    ecosystem tool types; the "Ecosystem-Installed Tools" worked
+    example in section 14.5 now covers all three).**
+    It installs through `cargo install`, the crate's own package
+    manager, reading whatever registry `~/.cargo/config.toml` source-replacement
+    points at — the same "user's own environment" network model
+    Phase A established, extended to a third channel.
+    It is version-pin-only like npm and pypi (no checksum field; the
+    approved-version list is the entire security boundary), so this is
+    not a third integrity exception, only a third ecosystem covered by
+    the one Phase A already introduced.
+    The one thing cargo does differently from npm/pypi: it has no
+    runner-selection variable, because cargo is the only tool that can
+    build a crate from source — there is nothing to choose between.
+    Routing and field-grammar shape are unchanged from Phase A.
 
 ## 1. Overview
 
@@ -102,8 +118,9 @@ In particular, normal operation of those tool types must not depend on:
 - Public release APIs
 - Other Internet services
 
-npm and pypi tool types (added in Phase A of the ecosystem tool types,
-section 14.5) are a scoped, deliberate exception to this list:
+npm, pypi, and cargo tool types (added in Phases A and B of the
+ecosystem tool types, section 14.5) are a scoped, deliberate exception
+to this list:
 they install through the ecosystem's own package manager, which reads
 whatever registry — crates.io, PyPI, npm, or a private mirror of any of
 them — the user's own environment already configures.
@@ -157,15 +174,16 @@ Developers should not need to understand or configure:
 
 Those are platform concerns and belong in `mise-vault`.
 
-One caveat, added by Phase A of the ecosystem tool types (section 14.5):
-a developer who wants an npm or pypi tool DOES need their own npm/pip/uv
-registry configuration pointed at a reachable registry
+One caveat, added by Phases A and B of the ecosystem tool types
+(section 14.5):
+a developer who wants an npm, pypi, or cargo tool DOES need their own
+npm/pip/uv/cargo registry configuration pointed at a reachable registry
 (usually already set up for their other ecosystem work).
 The plugin still hides the installation mechanism —
 which command runs, where the binary lands, which noise-suppression
 variables are set — but registry reachability is the same prerequisite
-that ordinary `npm install` or `pip install` already has,
-and this plugin does not remove it for these two types.
+that ordinary `npm install`, `pip install`, or `cargo install` already
+has, and this plugin does not remove it for these three types.
 
 ---
 
@@ -201,13 +219,13 @@ for those, and the diagram above is the complete dependency set.
 There must be no automatic fallback to public package registries or
 release APIs for these types.
 
-npm and pypi tools (section 14.5) are the deliberate exception:
+npm, pypi, and cargo tools (section 14.5) are the deliberate exception:
 `mise install <tool>@<version>` for those runs the ecosystem's own
 package manager against whatever registry the user's own environment
 configures, so the third arrow in the diagram above is theirs to draw,
 not the plugin's — reachability there depends on where that registry
-points, exactly as it would for an unmanaged `npm install` or
-`pip install`.
+points, exactly as it would for an unmanaged `npm install`,
+`pip install`, or `cargo install`.
 `mise ls-remote <tool>` never depends on any of this, for any tool type:
 version listing always reads the local catalog checkout, never a
 network call.
@@ -1056,22 +1074,24 @@ branch per ecosystem, never per-tool code.
 
 ---
 
-## 14.5 Ecosystem-Installed Tools (npm, pypi)
+## 14.5 Ecosystem-Installed Tools (npm, pypi, cargo)
 
-prettier (npm) and ruff (pypi) are the Phase A examples.
+prettier (npm) and ruff (pypi) are the Phase A examples; tokei (cargo)
+is the Phase B example.
 Like a go-installed tool, there is no artifact to download and no
-`platforms` entry in `tool.json` — just the package name the ecosystem
-already knows it by:
+`platforms` entry in `tool.json` — just the package or crate name the
+ecosystem already knows it by:
 
 ```json
 { "name": "prettier", "type": "npm", "package": "prettier" }
 { "name": "ruff", "type": "pypi", "package": "ruff" }
+{ "name": "tokei", "type": "cargo", "crate": "tokei" }
 ```
 
 `versions.json` carries a bare version and, deliberately, no checksum
-field at all: neither ecosystem supports an ad-hoc per-install content
-hash the way go's `h1` does, so these types are version-pin-only by
-design, and the approved-version list is the entire security boundary
+field at all: none of these ecosystems supports an ad-hoc per-install
+content hash the way go's `h1` does, so these types are version-pin-only
+by design, and the approved-version list is the entire security boundary
 for them, exactly as it already is for an `h1`-less go record.
 
 The load-bearing difference from every other tool type is the network
@@ -1084,22 +1104,31 @@ environment variable (`MISE_VAULT_NPM_RUNNER`, `MISE_VAULT_PYPI_RUNNER`
 registry from the user's own environment: `.npmrc` for npm,
 `pip.conf` for pipx (it installs through pip), `uv.toml` or
 `UV_DEFAULT_INDEX`/`UV_INSECURE_HOST` for the opt-in uv runner.
+A cargo tool has no runner-selection variable at all — cargo is the
+only tool that can build a crate from source, so it is always the
+runner — and it reads its registry from `~/.cargo/config.toml`
+`[source.crates-io]` `replace-with`.
 The plugin sets only placement (where the binary lands), the version
 pin, and a small table of noise-suppression and
 toolchain-download-refusal environment variables — it never sets a
 registry URL, an index URL, or any auth for these types.
 That is the scoped exception to the "no public internet, no fallback"
-principle stated in sections 1 and 2.1: for these two types, the
+principle stated in sections 1 and 2.1: for these three types, the
 network boundary is enforced by the same mechanism that already
-enforces it for a developer's own `npm install` or `pip install` —
-network policy (the forward proxy) and the user's own registry
-configuration — not by the plugin constructing a URL.
-Toolchains themselves (node/npm, python/pip/pipx/uv) are the user's
-responsibility too, the same way go's own toolchain already was;
+enforces it for a developer's own `npm install`, `pip install`, or
+`cargo install` — network policy (the forward proxy) and the user's own
+registry configuration — not by the plugin constructing a URL.
+Toolchains themselves (node/npm, python/pip/pipx/uv, the Rust
+toolchain and its C linker) are the user's responsibility too, the same
+way go's own toolchain already was;
 the plugin only requires the selected runner to be on `PATH` and fails
-closed, naming the fix, when it is not.
+closed, naming the fix, when it is not — for cargo, that message also
+names the Rust-toolchain-and-C-linker requirement, since cargo installs
+compile from source and a bare "cargo not found" would send an operator
+looking for the wrong fix.
 
-Installation (npm shown; pypi via pipx or uv follows the same shape):
+Installation (npm shown; pypi via pipx or uv, and cargo, follow the
+same shape):
 
 ```text
 version approved?
@@ -1111,6 +1140,13 @@ version approved?
    the placement controls)
 ```
 
+cargo's own command is `cargo install <crate> --version <version>
+--locked --root <install_path>` (`--locked` builds against the crate's
+committed lockfile, so the whole dependency tree is pinned, not just
+the crate's own version; `RUSTUP_AUTO_INSTALL=0` is its only env pin,
+stopping a rustup-provided cargo from downloading a missing toolchain
+on its own).
+
 The environment then exposes just:
 
 ```text
@@ -1119,8 +1155,8 @@ PATH=<install_path>/bin
 
 Full field grammars, the per-runner environment-variable table, the
 registry-probe conventions `scripts/add-version` uses, and the
-rollout phases (npm+pypi now, cargo and the bun runner later) are
-authoritative in `docs/specs/2026-08-20-ecosystem-tools-design.md`;
+remaining rollout phase (the bun runner) are authoritative in
+`docs/specs/2026-08-20-ecosystem-tools-design.md`;
 this section states the resulting shape, not the detail.
 
 ---
@@ -1393,13 +1429,13 @@ Private Nexus
 ```
 
 for artifact and go-installed tools.
-npm and pypi tools join this gate once their registry configuration
-points at Nexus proxy repositories (`npm-proxy`, `pypi-proxy`) with a
-warmed cache — still "only Private Nexus" in this test topology, but
-worth stating explicitly: the plugin itself does not guarantee that
-production points these types at Nexus rather than a real registry,
-it only refuses to override wherever the user's environment already
-points them (section 14.5).
+npm, pypi, and cargo tools join this gate once their registry
+configuration points at Nexus proxy repositories (`npm-proxy`,
+`pypi-proxy`, `cargo-proxy`) with a warmed cache — still "only Private
+Nexus" in this test topology, but worth stating explicitly: the plugin
+itself does not guarantee that production points these types at Nexus
+rather than a real registry, it only refuses to override wherever the
+user's environment already points them (section 14.5).
 
 This should eventually become a required release gate.
 
@@ -1763,8 +1799,8 @@ glab), all artifact or go-installed — "Tool artifacts come only from
 private Nexus", "SHA-256 verification is mandatory", "Public Internet
 access can be completely disabled", and "No public fallback occurs"
 hold exactly as written for those types, unchanged.
-npm and pypi tool types (section 14.5, Phase A, landed after this PoC)
-carry a different, later-documented network model:
+npm, pypi, and cargo tool types (section 14.5, Phases A and B, landed
+after this PoC) carry a different, later-documented network model:
 they are version-pin-only (no checksum field exists for them) and they
 install through the user's own ecosystem registry configuration rather
 than only from Nexus, so "Public Internet access can be completely

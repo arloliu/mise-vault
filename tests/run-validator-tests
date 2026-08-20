@@ -30,14 +30,19 @@ FIXTURES = ROOT / "tests" / "fixtures" / "invalid-catalog"
 # go-shaped version record from an artifact-shaped one (or a tool's module
 # from its own name) needs the other file, which a single JSON Schema can
 # never see — those four are built-in/cross-check-only by design.
-# The same reasoning excludes several npm/pypi cases: npm-bin-default-name-
-# too-long needs tool.json's "name" cross-checked against the bin grammar;
-# npm-version-double-plus, npm-version-is-pypi-shaped, pypi-version-hyphen-
-# abuse, and pypi-version-is-npm-shaped are versions that fail their OWN
-# ecosystem's grammar but still satisfy another ecosystem's bare "version"
-# shape (or go's very permissive one), so only the cross-file dispatch on
-# tool.json's declared type — not the schema's anyOf across all shapes —
-# catches them.
+# The same reasoning excludes several npm/pypi/cargo cases: npm-bin-default-
+# name-too-long and cargo-bin-default-name-too-long need tool.json's "name"
+# cross-checked against the bin grammar; npm-version-double-plus,
+# npm-version-is-pypi-shaped, pypi-version-hyphen-abuse,
+# pypi-version-is-npm-shaped, and cargo-version-is-pypi-shaped are versions
+# that fail their OWN ecosystem's grammar but still satisfy another
+# ecosystem's bare "version" shape (or go's very permissive one) — cargo and
+# npm share the exact same version grammar (see the design doc), so a cargo
+# version trap needs only the pypi-shaped case: anything that fails cargo's
+# grammar but is schema-catchable on its own already fails npm's identical
+# grammar too, and is covered by the npm cases above — so only the
+# cross-file dispatch on tool.json's declared type, not the schema's anyOf
+# across all shapes, catches any of these five.
 SCHEMA_CASES = ["artifact-traversal", "artifact-shell-metacharacters",
                 "artifact-missing-version", "bin-path-absolute",
                 "bin-path-traversal", "bad-sha256", "unknown-field",
@@ -54,8 +59,12 @@ SCHEMA_CASES = ["artifact-traversal", "artifact-shell-metacharacters",
                 "pypi-package-trailing-newline", "pypi-package-non-normalized",
                 "pypi-package-double-hyphen", "pypi-bin-slash",
                 "pypi-bin-uppercase", "pypi-version-uppercase",
-                "pypi-version-uppercase-local"]
-MIN_CASES = 47
+                "pypi-version-uppercase-local",
+                "cargo-crate-uppercase", "cargo-crate-leading-digit",
+                "cargo-crate-shell-metacharacters",
+                "cargo-crate-trailing-newline", "cargo-crate-too-long",
+                "cargo-crate-slash"]
+MIN_CASES = 55
 
 s = Suite("run-validator-tests")
 
@@ -75,12 +84,13 @@ for case in cases:
             detail="output: " + r.tail())
 
 # positive coverage: tests/fixtures/catalog holds one valid sample per tool
-# shape (go-sample, npm-sample, pypi-sample, plus the artifact-shaped ones),
-# validated together the way the real catalog is.
+# shape (go-sample, npm-sample, pypi-sample, cargo-sample, plus the
+# artifact-shaped ones), validated together the way the real catalog is.
 GO_SAMPLE = ROOT / "tests" / "fixtures" / "catalog" / "go-sample"
 SAMPLES = GO_SAMPLE.parent
 r = run([VALIDATE, "--engine", "builtin", "--catalog-dir", str(SAMPLES)])
-s.check("built-in engine accepts valid go/npm/pypi tools", r.ok, detail="output: " + r.tail())
+s.check("built-in engine accepts valid go/npm/pypi/cargo tools", r.ok,
+        detail="output: " + r.tail())
 
 if importlib.util.find_spec("jsonschema"):
     for name in SCHEMA_CASES:
@@ -88,7 +98,7 @@ if importlib.util.find_spec("jsonschema"):
         s.check(f"schemas alone reject: {name}", not r.ok,
                 detail="schemas/ has drifted behind the built-in rules; output: " + r.tail())
     r = run([VALIDATE, "--engine", "schema", "--catalog-dir", str(SAMPLES)])
-    s.check("schemas alone accept valid go/npm/pypi tools", r.ok, detail="output: " + r.tail())
+    s.check("schemas alone accept valid go/npm/pypi/cargo tools", r.ok, detail="output: " + r.tail())
 else:
     s.note("jsonschema not installed — schema-only passes skipped (CI runs them)", tag="NOTE")
 

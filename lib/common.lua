@@ -216,16 +216,33 @@ function M.check_pypi_package(package, label)
     return package
 end
 
---- Validate the optional "bin" field shared by npm/pypi (and cargo, later):
---- the executable name the plugin looks for after install and exposes on
---- PATH. It becomes part of a filesystem path, so the grammar is narrow
---- and shell-safe, and capped at 64 characters.
+--- Validate the optional "bin" field shared by npm, pypi, and cargo: the
+--- executable name the plugin looks for after install and exposes on PATH.
+--- It becomes part of a filesystem path, so the grammar is narrow and
+--- shell-safe, and capped at 64 characters.
 function M.check_bin_name(bin, label)
     if type(bin) ~= "string" or bin == "" or #bin > 64
         or bin:match("^[%l%d][%l%d%._%-]*$") == nil then
         error(label .. " is not a valid binary name: " .. tostring(bin))
     end
     return bin
+end
+
+--- Validate a crates.io crate name before it reaches a shell command:
+--- an alphabetic first character, then lowercase letters, digits,
+--- underscore, and hyphen, capped at crates.io's own 64-character limit.
+--- This is defense in depth: the catalog validator already enforces the
+--- same rule, but a runtime check never trusts a file on disk blindly.
+--- Deliberately narrower than crates.io's own rules (a shell-safety
+--- envelope, not a full syntax validator): historic uppercase crate names
+--- cannot be approved as-is, and a value can match here and still not
+--- exist in the registry — scripts/add-version probes for that.
+function M.check_crate_name(crate, label)
+    if type(crate) ~= "string" or crate == "" or #crate > 64
+        or crate:match("^%l[%l%d_%-]*$") == nil then
+        error(label .. " is not a valid crate name: " .. tostring(crate))
+    end
+    return crate
 end
 
 --- Lowercase semver envelope shared by npm and cargo versions

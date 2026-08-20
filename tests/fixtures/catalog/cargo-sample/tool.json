@@ -1,0 +1,6 @@
+{
+  "name": "cargo-sample",
+  "type": "cargo",
+  "crate": "sample-crate",
+  "bin": "sample"
+}

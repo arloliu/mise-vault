@@ -1,6 +1,7 @@
 # Minimal developer-workstation image for offline/CI testing:
 # mise + git + curl + coreutils, plus the ecosystem-tool-type runners
-# (npm, pipx, uv) the offline gate needs for the npm/pypi tool types.
+# (npm, pipx, uv, cargo) the offline gate needs for the npm/pypi/cargo tool
+# types.
 # Toolchains are deliberately image-build-time installs, not vault-managed
 # (cargo/npm/uv/pipx are the user's own responsibility, not the plugin's) —
 # this mirrors a real workstation that already has them, the same way mise
@@ -12,6 +13,7 @@
 #   --build-arg MISE_BINARY_URL=https://nexus.company.example/repository/devtools/mise/v2026.8.1/mise-linux-x64
 #   --build-arg MISE_INSTALL_URL=https://mirror.company.example/mise.run
 #   --build-arg UV_INSTALL_URL=https://mirror.company.example/uv-install.sh
+#   --build-arg RUSTUP_INSTALL_URL=https://mirror.company.example/rustup-init.sh
 # Standard proxy build args (http_proxy/https_proxy/no_proxy) are honored by
 # apt and curl automatically when passed with --build-arg.
 ARG BASE_IMAGE=ubuntu:24.04
@@ -24,7 +26,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      git curl ca-certificates xz-utils python3 python3-pip python3-venv pipx nodejs npm \
+      git curl ca-certificates xz-utils python3 python3-pip python3-venv pipx nodejs npm gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # Prefer a directly hosted mise binary (fully private); fall back to the
@@ -46,3 +48,42 @@ RUN curl -fsSL "$UV_INSTALL_URL" | UV_INSTALL_DIR=/usr/local/bin sh \
  && uv --version \
  && npm --version \
  && pipx --version
+
+# cargo: Ubuntu 24.04's apt rustc/cargo (1.75.0) is too old to build tokei
+# 14.0.0 — verified empirically: `cargo install tokei --version 14.0.0
+# --locked` fails with "package `clap-cargo v0.18.3` cannot be built because
+# it requires rustc 1.86 or newer, while the currently active rustc version
+# is 1.75.0". A rustup-installed stable toolchain (verified: 1.97.1 at the
+# time of writing) builds it in well under a minute against a warm proxy
+# cache.
+#
+# RUSTUP_HOME is pinned system-wide (independent of which $HOME a test run
+# uses) because it holds TOOLCHAIN state — which stable release is
+# installed — a system-level concern for this image, not something a test's
+# throwaway $HOME should affect. CARGO_HOME is deliberately left UNSET,
+# so it falls back to cargo's own default of $HOME/.cargo at runtime: that
+# is exactly the channel the plugin's registry configuration lives on
+# (~/.cargo/config.toml source replacement, design doc section 5), and
+# pinning CARGO_HOME here would silently make the plugin's own registry
+# config unreadable — verified empirically: with CARGO_HOME pinned to a
+# fixed system directory, `cargo install` ignored a ~/.cargo/config.toml
+# written under a different $HOME entirely and tried to reach
+# index.crates.io directly instead of the Nexus proxy.
+# The rustup-installed shim binaries (cargo, rustc, ...) land under
+# /root/.cargo/bin at build time (root's $HOME here); that fixed path is
+# added to PATH explicitly so the binaries stay reachable under ANY
+# runtime $HOME, the same way mise's own install above is reachable
+# regardless of $HOME.
+# gcc + libc6-dev (not the much larger build-essential) are enough for the
+# one C linker cargo needs — verified empirically against this same tokei
+# build, keeping image bloat to two apt packages instead of a full build
+# toolchain. libc6-dev must be named explicitly: this image installs with
+# --no-install-recommends, and gcc only RECOMMENDS libc6-dev rather than
+# depending on it, so without it the link step fails to find crt1.o/crti.o
+# and the C runtime libraries (observed empirically as exactly that error).
+ARG RUSTUP_INSTALL_URL="https://sh.rustup.rs"
+ENV RUSTUP_HOME=/root/.rustup \
+    PATH=/root/.cargo/bin:$PATH
+RUN curl -fsSL "$RUSTUP_INSTALL_URL" | sh -s -- -y --profile minimal --default-toolchain stable \
+ && rustc --version \
+ && cargo --version

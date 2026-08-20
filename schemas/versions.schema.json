@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gitlab.company.example/devtools/mise-vault/schemas/versions.schema.json",
   "title": "mise-vault approved versions (catalog/<tool>/versions.json)",
-  "description": "Ordered array, oldest-approved first. Order is authoritative; the plugin returns it verbatim. Per-item shapes intentionally overlap for the bare version-only records (go, npm, pypi): a numeric-looking version like \"1.0.0\" can satisfy more than one ecosystem's envelope at once, so items use anyOf rather than oneOf here. This schema only confirms a record matches at least one known shape; scripts/validate-catalog applies the exact grammar for the tool's declared type using the sibling tool.json file, which a single JSON Schema instance can never see.",
+  "description": "Ordered array, oldest-approved first. Order is authoritative; the plugin returns it verbatim. Per-item shapes intentionally overlap for the bare version-only records (go, npm, pypi, cargo): a numeric-looking version like \"1.0.0\" can satisfy more than one ecosystem's envelope at once, so items use anyOf rather than oneOf here. This schema only confirms a record matches at least one known shape; scripts/validate-catalog applies the exact grammar for the tool's declared type using the sibling tool.json file, which a single JSON Schema instance can never see.",
   "type": "array",
   "items": {
     "anyOf": [
@@ -50,7 +50,7 @@
         }
       },
       {
-        "title": "npm tool version record",
+        "title": "npm or cargo tool version record",
         "type": "object",
         "additionalProperties": false,
         "required": ["version"],
@@ -59,7 +59,7 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9a-z.-]+)?(\\+[0-9a-z.-]+)?(?![\\s\\S])",
-            "description": "Lowercase semver envelope. No checksum field for this type: none of these ecosystems supports an ad-hoc per-install content hash the way go's h1 does, so the approved-version list is the boundary, as it already is for a go record with no h1."
+            "description": "Lowercase semver envelope, shared verbatim by npm and cargo versions (both use the same grammar, so one branch covers both — see 'Implementation notes (Phase A)' in the design doc for why this schema uses anyOf rather than a duplicate identical branch per type). No checksum field for either type: none of these ecosystems supports an ad-hoc per-install content hash the way go's h1 does, so the approved-version list is the boundary, as it already is for a go record with no h1."
           }
         }
       },

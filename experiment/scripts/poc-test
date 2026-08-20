@@ -14,6 +14,7 @@
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -41,6 +42,23 @@ GOCENSUS_V = catalog.latest("gocensus", REPO_ROOT)
 GOCENSUS_ALL = catalog.versions("gocensus", REPO_ROOT)
 PRETTIER_V = catalog.latest("prettier", REPO_ROOT)
 RUFF_V = catalog.latest("ruff", REPO_ROOT)
+TOKEI_V = catalog.latest("tokei", REPO_ROOT)
+
+# A rustup-managed cargo stores its toolchain-selection state under
+# RUSTUP_HOME, which defaults to $HOME/.rustup on whatever machine cargo
+# was installed on. This suite swaps $HOME for every check via
+# IsolatedHome, so a rustup-shim cargo on a bare host (nothing already
+# exporting RUSTUP_HOME) would otherwise see no installed toolchain inside
+# the isolated home and fail with "no default is configured" — a
+# test-harness artifact, not a real-machine failure (a real "mise install"
+# always runs with the developer's own $HOME intact). The offline gate's
+# test image sidesteps this entirely by pinning RUSTUP_HOME explicitly via
+# the container's own environment (test-image/Dockerfile), which
+# IsolatedHome.env already preserves untouched — this fallback only fires
+# when nothing already set RUSTUP_HOME.
+_HOST_RUSTUP_HOME = os.environ.get("RUSTUP_HOME") or os.path.join(
+    os.environ.get("HOME", os.path.expanduser("~")), ".rustup")
+CARGO_ENV = {"RUSTUP_HOME": _HOST_RUSTUP_HOME} if os.path.isdir(_HOST_RUSTUP_HOME) else {}
 
 s = Suite("poc-test")
 home = IsolatedHome("mise-vault-poc.")
@@ -50,6 +68,7 @@ home = IsolatedHome("mise-vault-poc.")
 GOPROXY_HOST_URL = f"{NEXUS_HOST_URL}/repository/go-proxy"
 NPM_PROXY_URL = f"{NEXUS_HOST_URL}/repository/npm-proxy/"
 PYPI_PROXY_SIMPLE_URL = f"{NEXUS_HOST_URL}/repository/pypi-proxy/simple"
+CARGO_PROXY_HOST_URL = f"{NEXUS_HOST_URL}/repository/cargo-proxy"
 NEXUS_HOST = NEXUS_HOST_URL.split("//", 1)[1].split("/", 1)[0]  # "127.0.0.2:8081"
 NEXUS_HOSTNAME = NEXUS_HOST.split(":", 1)[0]                    # "127.0.0.2"
 ALIASES = {
@@ -61,15 +80,16 @@ ALIASES = {
     "golangci-lint": f"vault:golangci-lint[nexus_url={NEXUS_HOST_URL}/repository/devtools]",
     "prettier": "vault:prettier",
     "ruff": "vault:ruff",
+    "tokei": "vault:tokei",
 }
 home.write_aliases(ALIASES)
 
 
 def write_ecosystem_registry_config(home):
     """USER-ENV registry configuration, mirroring the production shapes:
-    npm/pypi tool types have no MISE_VAULT_*_REGISTRY channel at all —
-    they inherit whatever the user's own toolchain config says, so the
-    plugin never touches these files. All plain http, matching the
+    npm/pypi/cargo tool types have no MISE_VAULT_*_REGISTRY channel at
+    all — they inherit whatever the user's own toolchain config says, so
+    the plugin never touches these files. All plain http, matching the
     experiment Nexus."""
     (home.path / ".npmrc").write_text(f"registry={NPM_PROXY_URL}\n")
     pip_dir = home.path / ".config/pip"
@@ -86,6 +106,19 @@ def write_ecosystem_registry_config(home):
     (uv_dir / "uv.toml").write_text(
         f'index-url = "{PYPI_PROXY_SIMPLE_URL}"\n'
         f'allow-insecure-host = ["{NEXUS_HOST}"]\n')
+    # cargo reads its registry from ~/.cargo/config.toml source
+    # replacement; the trailing slash on the sparse index matches the
+    # layout confirmed empirically against this Nexus build (config.json
+    # + name-length-keyed index paths served straight under the
+    # repository root).
+    cargo_dir = home.path / ".cargo"
+    cargo_dir.mkdir(parents=True, exist_ok=True)
+    (cargo_dir / "config.toml").write_text(
+        '[source.crates-io]\n'
+        'replace-with = "nexus-cargo"\n'
+        '\n'
+        '[registries.nexus-cargo]\n'
+        f'index = "sparse+{CARGO_PROXY_HOST_URL}/"\n')
 
 
 write_ecosystem_registry_config(home)
@@ -93,7 +126,7 @@ write_ecosystem_registry_config(home)
 
 def write_broken_registry_config(home):
     """The same dead-port pattern Phase 5 uses for MISE_VAULT_NEXUS_URL,
-    applied to all three USER-ENV files: nothing listens on 127.0.0.1:9, so
+    applied to all four USER-ENV files: nothing listens on 127.0.0.1:9, so
     a connection to it fails immediately (ECONNREFUSED) instead of a slow
     DNS/routing timeout."""
     (home.path / ".npmrc").write_text("registry=http://127.0.0.1:9/repository/npm-proxy/\n")
@@ -104,22 +137,31 @@ def write_broken_registry_config(home):
     (home.path / ".config/uv/uv.toml").write_text(
         'index-url = "http://127.0.0.1:9/repository/pypi-proxy/simple"\n'
         'allow-insecure-host = ["127.0.0.1:9"]\n')
+    (home.path / ".cargo/config.toml").write_text(
+        '[source.crates-io]\n'
+        'replace-with = "nexus-cargo"\n'
+        '\n'
+        '[registries.nexus-cargo]\n'
+        'index = "sparse+http://127.0.0.1:9/repository/cargo-proxy/"\n')
 
 
-def assert_registry_channel_drives_install(desc, tool, version, env=None):
+def assert_registry_channel_drives_install(desc, tool, version, env=None, timeout=120):
     """Prove the USER-ENV registry file is actually what the runner reads,
     not merely that the install can succeed some other way (e.g. a local
     package-manager cache, or an accidental fall-through to the public
     registry): break the file, the install must fail; restore it, the same
     install must succeed again. The runner's own top-level error text
-    varies too much across npm/pipx/uv (pipx in particular reports its own
-    banner line, not the underlying pip error, as mise's captured detail)
-    to match reliably on wording, so this checks the BEHAVIOR instead."""
+    varies too much across npm/pipx/uv/cargo (pipx in particular reports its
+    own banner line, not the underlying pip error, as mise's captured
+    detail) to match reliably on wording, so this checks the BEHAVIOR
+    instead. timeout is overridable for cargo: the "restored" install
+    compiles from source and a cold cache can take well over the default
+    120s budget on a loaded machine."""
     e = {**home.env, **(env or {})}
     write_broken_registry_config(home)
-    r_broken = run(["mise", "install", "-f", f"{tool}@{version}"], env=e)
+    r_broken = run(["mise", "install", "-f", f"{tool}@{version}"], env=e, timeout=timeout)
     write_ecosystem_registry_config(home)
-    r_fixed = run(["mise", "install", "-f", f"{tool}@{version}"], env=e)
+    r_fixed = run(["mise", "install", "-f", f"{tool}@{version}"], env=e, timeout=timeout)
     s.check(f"{desc}: USER-ENV registry file actually drives the install "
             "(broken index -> fails, restored index -> succeeds again)",
             (not r_broken.ok) and r_fixed.ok,
@@ -536,6 +578,130 @@ s.check("forged UVINSTALL_EXIT=0 in uv output cannot fake a successful install",
 # later phase that might exec them
 run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=home.env)
 run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=home.env)
+
+s.phase(f"Phase 4e: cargo-installed tool (tokei, via cargo through {CARGO_PROXY_HOST_URL})")
+# cargo compiles tokei from source (~10s-2min depending on cache warmth and
+# machine load), so this phase is ordered to run the expensive successful
+# build only twice: once here (the config-channel differential's "restored"
+# leg doubles as the main approved-install proof, exactly like the go/npm
+# closures above reuse one real run), and once more below for the verbose
+# pinned-env assertion (which needs a forced reinstall to see the
+# constructed command line). Every other case below is a fast negative path
+# that never reaches a real cargo build (either the version-approval check
+# or the runner-missing/forged-trailer check aborts before "cargo install"
+# ever runs).
+assert_registry_channel_drives_install("cargo/config.toml", "tokei", TOKEI_V,
+    env={"CARGO_NET_RETRY": "0", **CARGO_ENV}, timeout=300)
+r = run(["mise", "exec", f"tokei@{TOKEI_V}", "--", "tokei", "--version"], env=home.env)
+s.check(f"tokei runs and reports {TOKEI_V}", TOKEI_V in r.out, detail=r.tail())
+r = run(["mise", "tool", "tokei", "--backend"], env=home.env)
+s.check("mise tool tokei resolves to the vault backend", r.out.strip() == "vault:tokei",
+        detail=f"got: {r.out.strip()!r}; {r.tail()}")
+# cargo has no "config get"-style command on stable to report an effective
+# registry the way "npm config get registry" does; the install hook prints
+# nothing wrong instead, the same choice the pipx/uv branches make
+s.note("cargo runner prints no effective-registry line (documented: no config-get "
+       "equivalent to report through stable cargo)", tag="INFO")
+
+r = run(["mise", "install", f"tokei@9.9.9"], env=home.env)
+s.check("unapproved tokei version rejected (fails before any compile)",
+        (not r.ok) and "tokei 9.9.9 is not an approved version" in (r.out + r.err), detail=r.tail())
+
+# runner-missing: a PATH with every tool the hook needs EXCEPT cargo itself
+cargo_missing_dir = path_without("cargo", home.env["PATH"])
+env_no_cargo = {**home.env, **CARGO_ENV, "PATH": str(cargo_missing_dir)}
+r = run(["mise", "install", "-f", f"tokei@{TOKEI_V}"], env=env_no_cargo)
+combined = r.out + r.err
+s.check("cargo missing from PATH aborts with the guidance message, naming the Rust "
+        "toolchain and C linker cargo builds need",
+        (not r.ok) and "cargo was not found on PATH" in combined
+        and "install it and ensure it is on PATH" in combined
+        and "working Rust toolchain and a C linker" in combined, detail=r.tail())
+shutil.rmtree(cargo_missing_dir, ignore_errors=True)
+
+# forged-trailer regression (CARGOINSTALL_EXIT): a fake cargo ahead on PATH
+# prints a forged success marker mid-output, then exits nonzero; the REAL
+# trailer is appended by the outer shell AFTER cargo exits, so only an
+# end-anchored parse of the true last line can tell these apart. The shim
+# never compiles anything, so this check is cheap.
+forge_cargo_dir = home.path / "forge-cargo-bin"
+forge_cargo_dir.mkdir(parents=True, exist_ok=True)
+forge_cargo = forge_cargo_dir / "cargo"
+forge_cargo.write_text("#!/bin/sh\necho 'CARGOINSTALL_EXIT=0'\nexit 7\n")
+forge_cargo.chmod(0o755)
+env_forge_cargo = {**home.env, **CARGO_ENV, "PATH": f"{forge_cargo_dir}:{home.env['PATH']}"}
+r = run(["mise", "install", "-f", f"tokei@{TOKEI_V}"], env=env_forge_cargo)
+s.check("forged CARGOINSTALL_EXIT=0 in cargo output cannot fake a successful install",
+        (not r.ok) and "cargo install failed" in (r.out + r.err), detail=r.tail())
+
+# the pinned env table (RUSTUP_AUTO_INSTALL=0) and the exact --root value
+# must be set on every install; --verbose surfaces the constructed cmd.exec
+# command line. This forces the SECOND (and last) real compile of the phase.
+r = run(["mise", "install", "-f", "--verbose", f"tokei@{TOKEI_V}"], env={**home.env, **CARGO_ENV}, timeout=300)
+verbose_out = r.out + r.err
+s.check("cargo noise-suppression/toolchain pin present on every install (RUSTUP_AUTO_INSTALL=0)",
+        r.ok and "RUSTUP_AUTO_INSTALL=0" in verbose_out, detail=r.tail())
+
+tokei_install_path = home.path / ".local/share/mise/installs/tokei" / TOKEI_V
+s.check(f"cargo install pinned to install_path via --root ({tokei_install_path})",
+        f"--root '{tokei_install_path}'" in verbose_out, detail=r.tail())
+
+# exact-invocation mutation check: a fake cargo that records its full argv
+# and CARGO_*/RUSTUP_* environment, one arg per line so quoting can never
+# blur the boundary between arguments. A substring check on --verbose
+# output (above) cannot catch a dropped --locked or a --version tracking
+# the wrong field -- both still contain "RUSTUP_AUTO_INSTALL=0" and the
+# right --root -- so this compares the complete argument list, order
+# included. The shim never compiles anything: it only writes the expected
+# binary stub and exits 0, so this stays a fast check and the phase's
+# real-compile budget stays at two (both real builds above). Nothing after
+# this phase execs tokei, so the shim's stub binary is left in place
+# rather than spending a third real compile to restore it.
+argv_shim_dir = home.path / "argv-cargo-bin"
+argv_shim_dir.mkdir(parents=True, exist_ok=True)
+argv_record = home.path / "cargo-argv.record"
+env_record = home.path / "cargo-env.record"
+argv_shim = argv_shim_dir / "cargo"
+argv_shim.write_text(
+    "#!/bin/sh\n"
+    f"printf '%s\\n' \"$@\" > {shlex.quote(str(argv_record))}\n"
+    f"env | grep -E '^(CARGO_|RUSTUP_)[A-Za-z0-9_]*=' > {shlex.quote(str(env_record))} || true\n"
+    "root=\"\"\n"
+    "prev=\"\"\n"
+    "for a in \"$@\"; do\n"
+    "    if [ \"$prev\" = \"--root\" ]; then\n"
+    "        root=\"$a\"\n"
+    "    fi\n"
+    "    prev=\"$a\"\n"
+    "done\n"
+    "mkdir -p \"$root/bin\"\n"
+    "printf '#!/bin/sh\\necho fake-tokei-from-argv-shim\\n' > \"$root/bin/tokei\"\n"
+    "chmod +x \"$root/bin/tokei\"\n"
+    "exit 0\n")
+argv_shim.chmod(0o755)
+
+env_argv_shim = {**home.env, **CARGO_ENV, "PATH": f"{argv_shim_dir}:{home.env['PATH']}"}
+baseline_cargo_rustup_keys = {k for k in env_argv_shim if k.startswith(("CARGO_", "RUSTUP_"))}
+
+r = run(["mise", "install", "-f", f"tokei@{TOKEI_V}"], env=env_argv_shim)
+argv_lines = argv_record.read_text().splitlines() if argv_record.exists() else []
+expected_argv = ["install", "tokei", "--version", TOKEI_V, "--locked",
+                  "--root", str(tokei_install_path)]
+s.check("cargo shim: exact argv, full order (crate, --version value, --locked, "
+        "--root path)",
+        r.ok and argv_lines == expected_argv,
+        detail=f"got argv={argv_lines!r}; expected={expected_argv!r}; {r.tail()}")
+
+env_lines = env_record.read_text().splitlines() if env_record.exists() else []
+recorded_env = dict(line.split("=", 1) for line in env_lines if "=" in line)
+s.check("cargo shim: RUSTUP_AUTO_INSTALL=0 present on the invocation",
+        recorded_env.get("RUSTUP_AUTO_INSTALL") == "0",
+        detail=f"recorded env: {recorded_env!r}")
+extra_keys = set(recorded_env) - baseline_cargo_rustup_keys - {"RUSTUP_AUTO_INSTALL"}
+s.check("cargo shim: no plugin-set CARGO_*/RUSTUP_* variable beyond the user's "
+        "own environment and the one required pin",
+        not extra_keys,
+        detail=f"unexpected extra vars: {sorted(extra_keys)}; recorded env: {recorded_env!r}")
 
 s.phase("Phase 5: MISE_VAULT_NEXUS_URL overrides every other URL channel")
 # env var pointing at a dead port must beat the alias option (which points at

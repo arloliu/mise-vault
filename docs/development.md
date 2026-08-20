@@ -12,7 +12,7 @@ mise clones it, reads `metadata.lua`, and calls the three Lua hooks in `hooks/`.
 | Piece | Runs when |
 |---|---|
 | `hooks/backend_list_versions.lua` | `mise ls-remote <tool>` — returns versions from `catalog/<tool>/versions.json`, order verbatim |
-| `hooks/backend_install.lua` | `mise install <tool>@<version>` — artifact tools: Nexus URL, `curl -n` download, SHA-256, extract; go tools: `go install` against the plugin-set GOPROXY (see the go-installed tools section); npm/pypi tools: the selected runner (npm; pipx or uv) against the user's own ecosystem registry configuration (see the npm and pypi tool types section) |
+| `hooks/backend_install.lua` | `mise install <tool>@<version>` — artifact tools: Nexus URL, `curl -n` download, SHA-256, extract; go tools: `go install` against the plugin-set GOPROXY (see the go-installed tools section); npm/pypi/cargo tools: the selected runner (npm; pipx or uv; cargo, the only possible runner for a cargo tool) against the user's own ecosystem registry configuration (see the npm, pypi, and cargo tool types section) |
 | `hooks/backend_exec_env.lua` | tool activation — PATH entries and env vars (e.g. GOROOT) from `tool.json` |
 | `lib/common.lua` | shared helpers used by all three hooks |
 | `scripts/vault-sync` | generates the machine config (`~/.config/mise/conf.d/mise-vault.toml`) from the catalog |
@@ -27,33 +27,38 @@ or test infrastructure (`experiment/`, `tests/`).
 - Docker with the compose plugin (the experiment stack runs Nexus, GitLab CE, and a CI runner)
 - mise 2026.8.1 or newer (`mise --version`)
 - `git`, `curl`, `python3` (no Python packages needed locally; CI installs `jsonschema`)
-- For the npm and pypi tool-type poc-test phases: `npm`, `pipx`, and `uv`
-  on `PATH` (bun is not needed — its runner is Phase C, not yet shipped)
+- For the npm, pypi, and cargo tool-type poc-test phases: `npm`, `pipx`,
+  `uv`, and a Rust toolchain (`cargo`, plus a C linker) on `PATH`
+  (bun is not needed — its runner is Phase C, not yet shipped)
 
 ## Environment setup (once)
 
 ```bash
 cd experiment
 docker compose up -d                  # Nexus is healthy in ~1 min; GitLab takes 3-6 min on first boot
-./scripts/provision-nexus.sh          # raw repo, go/npm/pypi proxy repos, read-only user (idempotent)
+./scripts/provision-nexus.sh          # raw repo, go/npm/pypi/cargo proxy repos, read-only user (idempotent)
 ./scripts/provision-gitlab.sh         # project, tokens, users (idempotent; waits for boot)
 ./scripts/provision-runner.sh         # CI runner + project variables (idempotent)
 ./scripts/seed-artifacts.sh           # real linux-amd64 tool artifacts, plus warms the
-                                       # npm-proxy/pypi-proxy caches for prettier/ruff (public internet, once)
+                                       # npm-proxy/pypi-proxy caches for prettier/ruff and the
+                                       # cargo-proxy cache for tokei's full dependency closure
+                                       # (public internet, once)
 ./scripts/seed-extra-platforms.sh     # linux-arm64 + darwin-arm64 artifacts (public internet, once)
 docker build -t mise-vault-test test-image/   # workstation-like image for offline/CI tests
 ```
 
-`provision-nexus.sh` creates the `npm-proxy` and `pypi-proxy` repositories
-used by the npm/pypi tool-type suites, and the offline gate's npm/pypi
-cases depend on `seed-artifacts.sh` having warmed those caches with
-`prettier@3.9.6` and `ruff==0.16.3` — an unwarmed cache means those cases
-have nothing to install from once the network is severed.
+`provision-nexus.sh` creates the `npm-proxy`, `pypi-proxy`, and
+`cargo-proxy` repositories used by the npm/pypi/cargo tool-type suites,
+and the offline gate's npm/pypi/cargo cases depend on `seed-artifacts.sh`
+having warmed those caches with `prettier@3.9.6`, `ruff==0.16.3`, and
+tokei's full dependency closure (a real `cargo install --locked`
+against the proxy) — an unwarmed cache means those cases have nothing
+to install from once the network is severed.
 If your stack was provisioned before these repos existed,
 re-run `./scripts/provision-nexus.sh` once:
 the `devtools-read` role is create-or-update, so a fresh run picks up
-the new npm-proxy/pypi-proxy read privileges on an existing stack
-without needing to tear anything down.
+the new npm-proxy/pypi-proxy/cargo-proxy read privileges on an existing
+stack without needing to tear anything down.
 
 Ports and credentials (test-only values) are in [experiment/README.md](../experiment/README.md),
 including the loopback-address trick:
@@ -106,9 +111,9 @@ git tag v0.0.X && git push experiment v0.0.X
 
 | Suite | Covers | Runtime |
 |---|---|---|
-| `experiment/scripts/poc-test` | plugin behavior matrix: discovery, installs (archive/runtime/binary/go/npm/pypi), aliases, `.tool-versions`, fail-closed paths, redirect refusal, catalog update, unsupported platform, runner-selection and runner-missing cases | ~2 min |
+| `experiment/scripts/poc-test` | plugin behavior matrix: discovery, installs (archive/runtime/binary/go/npm/pypi/cargo), aliases, `.tool-versions`, fail-closed paths, redirect refusal, catalog update, unsupported platform, runner-selection and runner-missing cases | ~2 min plus the cargo compile budget (see below) |
 | `experiment/scripts/bootstrap-test` | the full new-developer flow: netrc clone, `install.sh` self-detection, generated config, public-backend blocking, idempotency, `vault-sync`, and the plugin-install entry path | ~2 min |
-| `experiment/scripts/offline-test` | everything again inside a Docker network with **no route to the internet** — the release gate: run it before tagging a release | ~2 min |
+| `experiment/scripts/offline-test` | everything again inside a Docker network with **no route to the internet** — the release gate: run it before tagging a release, cargo case included unconditionally | ~2 min plus the cargo compile budget |
 | `scripts/validate-catalog` | catalog schema + rules, no network | seconds |
 | `tests/run-validator-tests` | the validator provably REJECTS unsafe catalog shapes (`tests/fixtures/invalid-catalog/`), no network | seconds |
 | `tests/run-approve-tests` | approve pre-flight must REJECT malformed or duplicate batch specs before any write, no network | seconds |
@@ -130,6 +135,19 @@ on a freshly provisioned experiment GitLab.
 and **fails loudly if its default branch is not your local HEAD** —
 push to the `experiment` remote before running it.
 Each suite prints `RESULT: N passed, M failed` and exits nonzero on any failure.
+
+Cargo compile budget: `poc-test` installs tokei via a real
+`cargo install --locked` twice (once to prove the registry-config channel
+actually drives the install, once more for the pinned-environment
+`--verbose` check); `offline-test` (via `offline-suite`) installs it once.
+`poc-test`'s remaining cargo cases either never reach `cargo install` at
+all (preflight rejections, cargo missing from PATH) or run against a fake
+`cargo` shim that records the invocation instead of compiling.
+A cold build cache adds noticeably to the runtimes above — anywhere from a
+few seconds to a couple of minutes per compile depending on machine and
+cache warmth.
+Run `./scripts/seed-artifacts.sh` at least once so the cargo-proxy cache
+is warm before timing a suite run.
 
 Known limitation: only `linux-amd64` installs are executed end-to-end.
 The other approved platforms (`linux-arm64`, `darwin-arm64`) are covered by
@@ -505,28 +523,30 @@ system-installed go at an approved version is accepted.
 In practice this only matters on a brand-new machine's very first run;
 every subsequent install finds `go` already there.
 
-### npm and pypi tool types
+### npm, pypi, and cargo tool types
 
-Like a go-installed tool, an npm or pypi tool has no `platforms` at all
-in its `tool.json` — just the package name:
+Like a go-installed tool, an npm, pypi, or cargo tool has no `platforms`
+at all in its `tool.json` — just the package or crate name:
 
 ```json
 { "name": "prettier", "type": "npm", "package": "prettier" }
 { "name": "ruff", "type": "pypi", "package": "ruff" }
+{ "name": "tokei", "type": "cargo", "crate": "tokei" }
 ```
 
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | must equal the catalog directory name |
-| `type` | yes | the literal string `"npm"` or `"pypi"` |
-| `package` | yes | the package name as the registry knows it — npm's own name grammar (scoped names allowed), or PyPI's PEP 503 normalized form for pypi (`scripts/add-version` refuses a non-normalized input and names the normalized form to use) |
+| `type` | yes | the literal string `"npm"`, `"pypi"`, or `"cargo"` |
+| `package` | yes for npm/pypi | the package name as the registry knows it — npm's own name grammar (scoped names allowed), or PyPI's PEP 503 normalized form for pypi (`scripts/add-version` refuses a non-normalized input and names the normalized form to use) |
+| `crate` | yes for cargo | the crate name as crates.io knows it — lowercase, alphabetic first character, 64-character cap |
 | `bin` | no | the executable name to verify and expose, when it differs from `name` (e.g. a future `httpie` entry would carry `"bin": "http"`); defaults to `name`, so when `bin` is absent, `name` itself must satisfy the bin grammar |
 | `env` | no | same as an artifact tool's `env` |
 
 `versions.json` carries a bare version and, deliberately, no checksum
-field: neither ecosystem supports an ad-hoc per-install content hash
-the way go's `h1` does, so these types are version-pin-only, and the
-approved-version list is the entire security boundary for them —
+field: none of these ecosystems supports an ad-hoc per-install content
+hash the way go's `h1` does, so these types are version-pin-only, and
+the approved-version list is the entire security boundary for them —
 exactly as it already is for an `h1`-less go record.
 
 ```json
@@ -538,11 +558,12 @@ exactly as it already is for an `h1`-less go record.
 Install semantics, the runner-selection env vars, the per-runner
 registry-configuration mapping, the guaranteed pinned environment
 variables, and the verified runner versions are all developer-facing
-detail that lives in [README.md](../README.md#npm-and-pypi-tools) —
+detail that lives in
+[README.md](../README.md#npm-pypi-and-cargo-tools) —
 read that section before touching this code, since the hooks assume
 exactly the pins documented there.
-Full field grammars and the rollout plan (cargo and the bun runner are
-later phases) are authoritative in
+Full field grammars and the rollout plan (the bun runner is the one
+remaining later phase) are authoritative in
 [`docs/specs/2026-08-20-ecosystem-tools-design.md`](specs/2026-08-20-ecosystem-tools-design.md).
 
 ## Nexus URL override channels

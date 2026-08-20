@@ -3,15 +3,17 @@
 ---     download (curl -n) -> mandatory SHA-256 verification -> extract -> install_path.
 ---   go tools: catalog lookup -> "go install <module>@v<version>" against the
 ---     plugin-controlled go proxy, with an optional module checksum check first.
----   npm/pypi tools: catalog lookup -> the selected runner (npm; pipx or uv) installs
----     the pinned package version straight into install_path/bin, reading whatever
----     registry/proxy/auth configuration the user's own environment already has —
----     the plugin does not construct or control that network path the way it does
----     for artifact and go installs (see docs/specs/2026-08-20-ecosystem-tools-design.md).
+---   npm/pypi/cargo tools: catalog lookup -> the selected runner (npm; pipx or uv;
+---     cargo) installs the pinned package version straight into install_path/bin,
+---     reading whatever registry/proxy/auth configuration the user's own
+---     environment already has — the plugin does not construct or control that
+---     network path the way it does for artifact and go installs
+---     (see docs/specs/2026-08-20-ecosystem-tools-design.md).
 --- Fail-closed: any miss or mismatch aborts with a specific error.
 --- The artifact and go install paths never fall back to a public service.
---- npm/pypi installs intentionally inherit the user's own ecosystem registry
---- configuration, a deliberate, scoped exception to that rule (see the design doc above).
+--- npm/pypi/cargo installs intentionally inherit the user's own ecosystem
+--- registry configuration, a deliberate, scoped exception to that rule
+--- (see the design doc above).
 
 --- Install a tool built with "go install". Runs before the platform lookup:
 --- go tools carry no platforms entry at all, they run wherever an approved
@@ -226,9 +228,11 @@ local function install_go_tool(ctx, tool, vrec, common, cmd, strings, json)
 end
 
 --- Toolchains are the user's responsibility for the ecosystem types (npm,
---- pypi, and later cargo): the plugin only requires the selected runner to
---- exist on PATH, never installs or version-gates it, and never falls back
---- silently from one runner to another.
+--- pypi, and cargo): the plugin only requires the selected runner to exist
+--- on PATH, never installs or version-gates it, and never falls back
+--- silently from one runner to another. cargo has no MISE_VAULT_CARGO_RUNNER:
+--- cargo is always the runner, since it is the only tool that can build a
+--- crate from source (see install_cargo_tool below).
 --- MISE_VAULT_NPM_RUNNER: "npm" (default) or "bun". "bun" is recognized but
 --- rejected with its own message until the bun runner ships (Phase C) — a
 --- distinct error from an unrecognized value.
@@ -264,17 +268,22 @@ end
 --- mise-managed, so a plain PATH lookup is correct here — the one exception
 --- is a runner the user installed VIA mise, which will not be visible; the
 --- error message says so rather than pretending the plugin can find it.
-local function require_runner(bin_name, cmd, strings, common)
+--- extra_guidance is an optional trailing sentence appended to the message
+--- (used by the cargo branch to also mention the Rust toolchain and C
+--- linker its builds need); the npm/pypi callers pass nothing, so their
+--- message text is unchanged.
+local function require_runner(bin_name, cmd, strings, common, extra_guidance)
     -- bin_name is always one of this file's own literal runner names
-    -- ("npm", "pipx", "uv"), never catalog or environment data, but every
-    -- interpolated value is shell-quoted anyway, the same defense in depth
-    -- every other command in this file uses.
+    -- ("npm", "pipx", "uv", "cargo"), never catalog or environment data, but
+    -- every interpolated value is shell-quoted anyway, the same defense in
+    -- depth every other command in this file uses.
     local out = cmd.exec("command -v " .. common.shell_quote(bin_name) .. " 2>&1 || true")
     if strings.trim_space(out) == "" then
         error(bin_name .. " was not found on PATH — install it and ensure it is on PATH, " ..
               "then retry (note: mise strips its own managed tool paths from PATH while " ..
               "this hook runs, so a " .. bin_name .. " installed via 'mise use' will not " ..
-              "be visible here even though it is installed)")
+              "be visible here even though it is installed)" ..
+              ((extra_guidance ~= nil and extra_guidance ~= "") and (" — " .. extra_guidance) or ""))
     end
 end
 
@@ -452,6 +461,87 @@ local function install_pypi_tool(ctx, tool, vrec, common, cmd, strings)
     return {}
 end
 
+--- Install a crate published to crates.io, via "cargo install".
+--- linux/darwin only, for the same reason as the npm and pypi branches above.
+--- Unlike npm and pypi, there is no MISE_VAULT_CARGO_RUNNER: cargo is always
+--- the runner, since it is the only tool that can build a crate from source.
+local function install_cargo_tool(ctx, tool, vrec, common, cmd, strings)
+    local file = require("file")
+    local q = common.shell_quote
+
+    if RUNTIME.osType ~= "linux" and RUNTIME.osType ~= "darwin" then
+        error(ctx.tool .. " is a cargo-installed tool, which is only supported on linux " ..
+              "and darwin (this platform reports " .. RUNTIME.osType .. ")")
+    end
+
+    -- Defense in depth: the catalog validator already enforces these
+    -- grammars, so a hand-edited or compromised file on disk can never
+    -- reach a shell command unvalidated, the same as the go module path.
+    common.check_crate_name(tool.crate, "crate")
+    common.check_semver_envelope(ctx.version, "version")
+    local bin_name = tool.bin or ctx.tool
+    common.check_bin_name(bin_name, "bin")
+
+    -- cargo installs compile from source, so a working Rust toolchain and C
+    -- linker must already be on this machine — the runner-missing message
+    -- names that up front, since a bare "cargo not found" would otherwise
+    -- send an operator looking for the wrong fix.
+    require_runner("cargo", cmd, strings, common,
+        "cargo installs compile from source, so this machine also needs a working " ..
+        "Rust toolchain and a C linker")
+
+    -- Same reasoning as the npm branch above: cargo writes only under
+    -- install_path (--root below), nothing is cached under
+    -- ctx.download_path, so there is no equivalent leftover-cache directory
+    -- to clear here.
+    local bin_dir = file.join_path(ctx.install_path, "bin")
+    -- RUSTUP_AUTO_INSTALL=0: a rustup-provided cargo would otherwise
+    -- download a missing toolchain by itself. Toolchains are the user's
+    -- responsibility, and such a download may reach hosts outside the
+    -- configured registry.
+    -- No other env pins for cargo: cargo reads its registry from
+    -- ~/.cargo/config.toml source replacement, which the plugin never
+    -- overrides.
+    local cargo_env = "RUSTUP_AUTO_INSTALL=0"
+
+    -- cargo has no "config get"-style command on stable to report an
+    -- effective registry the way "npm config get registry" does; printing
+    -- nothing wrong beats printing something wrong, the same choice the
+    -- pipx and uv branches above make for the same reason.
+    print("mise-vault: installing " .. tool.crate .. "@" .. ctx.version .. " via cargo")
+
+    -- --locked: build against the crate's own committed Cargo.lock, so the
+    -- whole dependency tree is pinned, not just the crate's own version.
+    -- If a crate ships no lockfile, cargo errors on this flag — that
+    -- failure is a real signal (the crate cannot be installed
+    -- reproducibly), so it is surfaced via the same first-line-of-output
+    -- detail below, not swallowed by falling back to an unlocked build.
+    -- Success is judged by an unconditional numeric exit-status trailer
+    -- printed as the very last line, never a fixed success word: build
+    -- output is attacker-influenced text (a failing build script can print
+    -- anything), and only the final trailer line is read. mise's cmd.exec
+    -- shell aborts on the first unguarded nonzero status, so every step
+    -- here is guarded.
+    local out = cmd.exec(
+        "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. cargo_env ..
+        " cargo install " .. q(tool.crate) .. " --version " .. q(ctx.version) ..
+        " --locked --root " .. q(ctx.install_path) ..
+        " 2>&1 || st=$?; } && echo \"CARGOINSTALL_EXIT=$st\"")
+    local status = out:match("CARGOINSTALL_EXIT=(%d+)%s*$")
+    if status ~= "0" then
+        local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
+        error("cargo install failed for " .. ctx.tool .. " " .. ctx.version ..
+              (detail ~= "" and (": " .. detail) or ""))
+    end
+
+    local bin_path = file.join_path(bin_dir, bin_name)
+    if not file.exists(bin_path) then
+        error(missing_bin_error("cargo", bin_name, bin_dir))
+    end
+
+    return {}
+end
+
 function PLUGIN:BackendInstall(ctx)
     local common = require("lib/common")
     local file = require("file")
@@ -477,6 +567,9 @@ function PLUGIN:BackendInstall(ctx)
     end
     if tool.type == "pypi" then
         return install_pypi_tool(ctx, tool, vrec, common, cmd, strings)
+    end
+    if tool.type == "cargo" then
+        return install_cargo_tool(ctx, tool, vrec, common, cmd, strings)
     end
 
     local platform = common.platform()

@@ -29,6 +29,18 @@
 #       both: npm has no netrc auth channel at all, and the experiment's
 #       USER-ENV .npmrc / pip.conf / uv.toml carry no embedded credentials,
 #       mirroring the production shapes.
+#   4g-4h. Create a cargo proxy repository (caches index.crates.io) for
+#       cargo-installed tools (Phase B of the same design doc), and extend
+#       the same scoped anonymous-read exception to it: cargo's own registry
+#       auth model is unrelated to netrc, and the experiment's USER-ENV
+#       ~/.cargo/config.toml carries no embedded credentials either. Verified
+#       empirically against this Nexus CE build (3.95.1): the cargo proxy
+#       recipe exists, remoteUrl "https://index.crates.io" serves both the
+#       sparse index (JSON lines under a name-length-keyed path, e.g.
+#       "to/ke/tokei") and — via the repository's own "dl" field in
+#       config.json — proxies the matching crate tarball downloads, so one
+#       "cargo install" against it pulls a crate's whole dependency closure
+#       exactly like the go/npm/pypi proxies above.
 #   5. Create a read-only role + `developer` user (simulates workstation credentials).
 #   6. Upload a smoke artifact as admin, download it back as developer, verify sha256.
 set -euo pipefail
@@ -229,11 +241,46 @@ else
   log "created pypi proxy repository '$PYPI_PROXY_REPO' (caches $PYPI_PROXY_REMOTE)"
 fi
 
-# --- 4f. anonymous read, scoped to ONLY the go/npm/pypi proxy repositories ---
-# Same reasoning as 4c, extended to the two new proxy repos: npm has no
-# netrc-based auth channel at all, and the experiment's pip.conf / uv.toml
-# carry no embedded credentials either (mirroring the production shapes in
-# the design doc), so both proxies need the same scoped anonymous exception.
+# --- 4g. cargo proxy repository (caches index.crates.io for cargo-installed tools) ---
+CARGO_PROXY_REPO=cargo-proxy
+CARGO_PROXY_REMOTE=${CARGO_PROXY_REMOTE:-https://index.crates.io}
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/repositories/cargo/proxy/$CARGO_PROXY_REPO" >/dev/null 2>&1; then
+  log "repository '$CARGO_PROXY_REPO' already exists"
+else
+  curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/repositories/cargo/proxy" \
+    -H 'Content-Type: application/json' -d "{
+      \"name\": \"$CARGO_PROXY_REPO\",
+      \"online\": true,
+      \"storage\": {
+        \"blobStoreName\": \"default\",
+        \"strictContentTypeValidation\": true
+      },
+      \"proxy\": {
+        \"remoteUrl\": \"$CARGO_PROXY_REMOTE\",
+        \"contentMaxAge\": 1440,
+        \"metadataMaxAge\": 1440
+      },
+      \"negativeCache\": {
+        \"enabled\": true,
+        \"timeToLive\": 1440
+      },
+      \"httpClient\": {
+        \"blocked\": false,
+        \"autoBlock\": true
+      },
+      \"cargo\": {
+        \"requireAuthentication\": false
+      }
+    }"
+  log "created cargo proxy repository '$CARGO_PROXY_REPO' (caches $CARGO_PROXY_REMOTE)"
+fi
+
+# --- 4f. anonymous read, scoped to ONLY the go/npm/pypi/cargo proxy repositories ---
+# Same reasoning as 4c, extended to the new proxy repos: npm has no
+# netrc-based auth channel at all, and the experiment's pip.conf / uv.toml /
+# cargo config.toml carry no embedded credentials either (mirroring the
+# production shapes in the design doc), so every proxy needs the same scoped
+# anonymous exception.
 NPM_PROXY_ANON_ROLE=npm-proxy-anon-read
 if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/$NPM_PROXY_ANON_ROLE" >/dev/null 2>&1; then
   log "role $NPM_PROXY_ANON_ROLE already exists"
@@ -268,6 +315,23 @@ else
     }" >/dev/null
   log "created role $PYPI_PROXY_ANON_ROLE"
 fi
+CARGO_PROXY_ANON_ROLE=cargo-proxy-anon-read
+if curl -sf -u "$AUTH" "$NEXUS_URL/service/rest/v1/security/roles/$CARGO_PROXY_ANON_ROLE" >/dev/null 2>&1; then
+  log "role $CARGO_PROXY_ANON_ROLE already exists"
+else
+  curl -sf -u "$AUTH" -X POST "$NEXUS_URL/service/rest/v1/security/roles" \
+    -H 'Content-Type: application/json' -d "{
+      \"id\": \"$CARGO_PROXY_ANON_ROLE\",
+      \"name\": \"$CARGO_PROXY_ANON_ROLE\",
+      \"description\": \"anonymous read of $CARGO_PROXY_REPO ONLY — never $REPO\",
+      \"privileges\": [
+        \"nx-repository-view-cargo-$CARGO_PROXY_REPO-read\",
+        \"nx-repository-view-cargo-$CARGO_PROXY_REPO-browse\"
+      ],
+      \"roles\": []
+    }" >/dev/null
+  log "created role $CARGO_PROXY_ANON_ROLE"
+fi
 curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/users/anonymous" \
   -H 'Content-Type: application/json' -d "{
     \"userId\": \"anonymous\",
@@ -276,12 +340,12 @@ curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/users/anonymous"
     \"emailAddress\": \"anonymous@example.org\",
     \"source\": \"default\",
     \"status\": \"active\",
-    \"roles\": [\"$GO_PROXY_ANON_ROLE\", \"$NPM_PROXY_ANON_ROLE\", \"$PYPI_PROXY_ANON_ROLE\"]
+    \"roles\": [\"$GO_PROXY_ANON_ROLE\", \"$NPM_PROXY_ANON_ROLE\", \"$PYPI_PROXY_ANON_ROLE\", \"$CARGO_PROXY_ANON_ROLE\"]
   }" >/dev/null
 curl -sf -u "$AUTH" -X PUT "$NEXUS_URL/service/rest/v1/security/anonymous" \
   -H 'Content-Type: application/json' \
   -d '{"enabled": true, "userId": "anonymous", "realmName": "NexusAuthorizingRealm"}' >/dev/null
-log "anonymous access re-enabled, scoped to $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO only"
+log "anonymous access re-enabled, scoped to $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO, $CARGO_PROXY_REPO only"
 
 # --- 5. read-only role + developer user ----------------------------------
 # This role is always PUT (create-or-update), not create-once: unlike the
@@ -311,7 +375,7 @@ curl -sf -u "$AUTH" -X "$DEVTOOLS_ROLE_METHOD" "$DEVTOOLS_ROLE_URL" \
   -H 'Content-Type: application/json' -d "{
     \"id\": \"devtools-read\",
     \"name\": \"devtools-read\",
-    \"description\": \"read-only access to $REPO, $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO\",
+    \"description\": \"read-only access to $REPO, $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO, $CARGO_PROXY_REPO\",
     \"privileges\": [
       \"nx-repository-view-raw-$REPO-read\",
       \"nx-repository-view-raw-$REPO-browse\",
@@ -320,7 +384,9 @@ curl -sf -u "$AUTH" -X "$DEVTOOLS_ROLE_METHOD" "$DEVTOOLS_ROLE_URL" \
       \"nx-repository-view-npm-$NPM_PROXY_REPO-read\",
       \"nx-repository-view-npm-$NPM_PROXY_REPO-browse\",
       \"nx-repository-view-pypi-$PYPI_PROXY_REPO-read\",
-      \"nx-repository-view-pypi-$PYPI_PROXY_REPO-browse\"
+      \"nx-repository-view-pypi-$PYPI_PROXY_REPO-browse\",
+      \"nx-repository-view-cargo-$CARGO_PROXY_REPO-read\",
+      \"nx-repository-view-cargo-$CARGO_PROXY_REPO-browse\"
     ],
     \"roles\": []
   }" >/dev/null
@@ -399,6 +465,19 @@ case "$PYPI_PROXY_PROBE_CODE" in
 esac
 log "anonymous read of $PYPI_PROXY_REPO correctly allowed (scoped exception; probe HTTP $PYPI_PROXY_PROBE_CODE)"
 
+# config.json is always served by an online cargo proxy repository regardless
+# of crate content, so it is a reliable probe path that never depends on
+# guessing a real (or plausibly absent) crate name or its index-path bucket.
+CARGO_PROXY_PROBE_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+  "$NEXUS_URL/repository/$CARGO_PROXY_REPO/config.json")
+case "$CARGO_PROXY_PROBE_CODE" in
+  401|403)
+    echo "ERROR: anonymous read of $CARGO_PROXY_REPO was rejected (HTTP $CARGO_PROXY_PROBE_CODE)"
+    exit 1
+    ;;
+esac
+log "anonymous read of $CARGO_PROXY_REPO correctly allowed (scoped exception; probe HTTP $CARGO_PROXY_PROBE_CODE)"
+
 # developer (read-only) must succeed and hash must match
 GOT_SHA=$(curl -sf -u "$DEV_USER:$DEV_PW" "$NEXUS_URL/repository/$REPO/$SMOKE_PATH" | sha256sum | awk '{print $1}')
 [ "$GOT_SHA" = "$WANT_SHA" ] || { echo "ERROR: sha mismatch"; exit 1; }
@@ -432,6 +511,15 @@ case "$DEV_PYPI_CODE" in
     ;;
 esac
 log "developer read of $PYPI_PROXY_REPO correctly allowed (probe HTTP $DEV_PYPI_CODE)"
+DEV_CARGO_CODE=$(curl -s -o /dev/null -w '%{http_code}' -u "$DEV_USER:$DEV_PW" \
+  "$NEXUS_URL/repository/$CARGO_PROXY_REPO/config.json")
+case "$DEV_CARGO_CODE" in
+  401|403)
+    echo "ERROR: developer read of $CARGO_PROXY_REPO was rejected (HTTP $DEV_CARGO_CODE) — devtools-read is stale"
+    exit 1
+    ;;
+esac
+log "developer read of $CARGO_PROXY_REPO correctly allowed (probe HTTP $DEV_CARGO_CODE)"
 
 # developer must NOT be able to write
 if curl -sf -u "$DEV_USER:$DEV_PW" --upload-file "$TMPF" \
@@ -444,8 +532,9 @@ log "Nexus provisioning complete"
 echo
 echo "  URL        : $NEXUS_URL"
 echo "  admin      : admin / $ADMIN_NEW_PW"
-echo "  developer  : $DEV_USER / $DEV_PW  (read-only on $REPO, $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO)"
+echo "  developer  : $DEV_USER / $DEV_PW  (read-only on $REPO, $GO_PROXY_REPO, $NPM_PROXY_REPO, $PYPI_PROXY_REPO, $CARGO_PROXY_REPO)"
 echo "  repository : $NEXUS_URL/repository/$REPO/<tool>/<version>/<artifact>"
 echo "  go proxy   : $NEXUS_URL/repository/$GO_PROXY_REPO  (caches $GO_PROXY_REMOTE; anonymous read)"
 echo "  npm proxy  : $NEXUS_URL/repository/$NPM_PROXY_REPO  (caches $NPM_PROXY_REMOTE; anonymous read)"
 echo "  pypi proxy : $NEXUS_URL/repository/$PYPI_PROXY_REPO/simple  (caches $PYPI_PROXY_REMOTE; anonymous read)"
+echo "  cargo proxy: $NEXUS_URL/repository/$CARGO_PROXY_REPO  (caches $CARGO_PROXY_REMOTE; anonymous read; sparse index)"

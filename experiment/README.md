@@ -57,10 +57,10 @@ hostnames (e.g. add `nexus.local` / `gitlab.local` to /etc/hosts).
 http://localhost:8081/repository/devtools/<tool>/<version>/<artifact>
 ```
 
-## Proxy repositories (go/npm/pypi tool types)
+## Proxy repositories (go/npm/pypi/cargo tool types)
 
 Nexus also proxies the public registries these tool types install from, all
-served plain http and readable anonymously (scoped to exactly these three
+served plain http and readable anonymously (scoped to exactly these four
 repositories — see `provision-nexus.sh` for why):
 
 | Repository | Caches | URL |
@@ -68,6 +68,18 @@ repositories — see `provision-nexus.sh` for why):
 | `go-proxy` | `proxy.golang.org` | `http://localhost:8081/repository/go-proxy` |
 | `npm-proxy` | `registry.npmjs.org` | `http://localhost:8081/repository/npm-proxy` |
 | `pypi-proxy` | `pypi.org` | `http://localhost:8081/repository/pypi-proxy/simple` |
+| `cargo-proxy` | `index.crates.io` | `http://localhost:8081/repository/cargo-proxy` |
+
+`cargo-proxy` is a Nexus cargo proxy repository
+(verified against this experiment's Nexus CE 3.95.1: the `cargo` recipe exists).
+A cargo client points at it as a `sparse+http(s)://` registry index,
+with a trailing slash:
+`sparse+http://localhost:8081/repository/cargo-proxy/`
+in `~/.cargo/config.toml`'s `[registries.<name>].index`.
+The repository serves the crates.io sparse index layout (e.g. `to/ke/tokei`)
+and proxies matching crate tarball downloads through its own `config.json` `"dl"` field —
+one `cargo install --locked` therefore pulls a crate's entire dependency closure
+through this one repository, the same as the go/npm/pypi proxies above.
 
 `seed-artifacts.sh` warms each cache with exactly the approved catalog
 versions before an offline run, the same way it uploads artifacts to
@@ -85,9 +97,11 @@ public package indexes once mirrors exist:
 | test image apt packages | `--build-arg APT_MIRROR=http://mirror.../ubuntu` | `docker build test-image/` |
 | mise binary in test image | `--build-arg MISE_BINARY_URL=...` (hosted binary) or `MISE_INSTALL_URL=...` (mirrored install script) | `docker build test-image/` |
 | uv install script in test image | `--build-arg UV_INSTALL_URL=...` | `docker build test-image/` |
+| rustup install script in test image | `--build-arg RUSTUP_INSTALL_URL=...` | `docker build test-image/` |
 | go-proxy remote | `GO_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
 | npm-proxy remote | `NPM_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
 | pypi-proxy remote | `PYPI_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
+| cargo-proxy remote | `CARGO_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
 | CI job images | `PYTHON_IMAGE`, `PYTHON_SLIM_IMAGE`, `DEVTOOLS_CI_IMAGE` | GitLab CI variables |
 | Go toolchain for checksum CI | ship go inside `PYTHON_IMAGE` (the job's apt fallback is skipped when the image already has `go`) | GitLab CI variable |
 | CI pip packages | `PIP_INDEX_URL` | GitLab CI variable (pip reads it natively) |

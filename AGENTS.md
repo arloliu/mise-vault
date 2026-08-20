@@ -16,7 +16,7 @@ that distributes centrally approved developer tools inside an isolated enterpris
   Artifact and go-installed tools carry this guarantee absolutely:
   the plugin builds every download URL itself, from Nexus or the
   plugin-controlled go proxy, and constructs no other URL.
-  npm and pypi tool types are a scoped, deliberate exception:
+  npm, pypi, and cargo tool types are a scoped, deliberate exception:
   the plugin constructs no registry URL of its own for them at all —
   they install through the ecosystem's own package manager,
   which reads whatever registry, proxy, and auth configuration
@@ -36,7 +36,7 @@ metadata.lua            plugin identity (backend plugin name: vault)
 hooks/                  the three mise backend hooks (list versions, install, exec env)
 lib/common.lua          shared helpers: catalog loading, platform id, URL building
 catalog/<tool>/         tool.json (packaging) + versions.json (approved versions;
-                        sha256 for artifact tools, no checksum field for npm/pypi)
+                        sha256 for artifact tools, no checksum field for npm/pypi/cargo)
 config/defaults.json    default Nexus base URL
 schemas/                JSON Schemas for the two catalog file types
 scripts/                catalog tooling: approve, add-version, validate-catalog, verify-artifacts, vault-sync
@@ -67,8 +67,8 @@ tmp/                    scratch area, not part of the deliverable
   A go-tool version record may omit its `h1` module checksum
   (an explicit proxy-trust entry, requiring `--no-h1` at approval time) —
   but a recorded `h1` is always enforced.
-  npm and pypi tool types are version-pin-only by design:
-  neither ecosystem supports an ad-hoc per-install content hash
+  npm, pypi, and cargo tool types are version-pin-only by design:
+  none of these ecosystems supports an ad-hoc per-install content hash
   the way go's `h1` does, so no checksum field exists for them at all,
   and there is nothing to make optional.
   In every case the approved-version list still gates every install.
@@ -190,10 +190,12 @@ The operative rules:
   (they run through `cmd`-spawned curl, outside mise's own HTTP layer).
   For artifact and go installs, never-contact-the-internet is enforced by the
   plugin constructing only Nexus and plugin-controlled-proxy URLs.
-  npm and pypi installs are the scoped exception to that mechanism:
+  npm, pypi, and cargo installs are the scoped exception to that mechanism:
   the plugin constructs no registry URL for them at all —
-  the selected runner uses whatever registry the user's own environment
-  configures, and egress there is enforced by the network, not the plugin.
+  the selected runner (cargo is always the runner for a cargo tool; there
+  is no MISE_VAULT_CARGO_RUNNER) uses whatever registry the user's own
+  environment configures, and egress there is enforced by the network,
+  not the plugin.
 - **Under `set -o pipefail`, piping a failing mise command into `grep -q` hides the match** —
   the nonzero mise exit wins the pipeline status. Capture output into a variable first, then grep.
 - **An alias pointing at an uninstalled plugin does not auto-install it.**
@@ -231,6 +233,33 @@ The operative rules:
   existed on a previously provisioned stack.
   Anyone who provisioned before the npm/pypi repos existed must re-run
   `provision-nexus.sh` once to pick up the new privileges.
+  The cargo proxy repository (Phase B) adds both a new repository and its
+  own scoped anonymous-read role the same way the npm/pypi proxies did,
+  so the same re-run requirement extends to anyone who provisioned before
+  cargo-proxy existed.
+- **Pinning `CARGO_HOME` system-wide silently severs the user's own
+  `~/.cargo/config.toml` registry channel** — verified while building the
+  cargo test-image layer: with `CARGO_HOME` pinned to a fixed system
+  directory, `cargo install` ignored a `~/.cargo/config.toml` written
+  under a different `$HOME` entirely and went straight to
+  `index.crates.io` instead of the configured proxy.
+  Leave `CARGO_HOME` unset (it then defaults to `$HOME/.cargo`, cargo's
+  own default) whenever the user's registry configuration must keep
+  working; pin only `RUSTUP_HOME` and `PATH` for toolchain discovery,
+  since those hold system-level toolchain state rather than the
+  per-user registry configuration.
+- **Ubuntu 24.04's apt `rustc`/`cargo` (1.75.0) cannot build current
+  crates** — verified empirically: `cargo install tokei --version 14.0.0
+  --locked` fails because a dependency (`clap-cargo`) requires rustc
+  1.86 or newer.
+  A rustup-installed stable toolchain (verified: 1.97.1) builds it in
+  well under a minute against a warm proxy cache, so the cargo test
+  image installs rustup instead of the distribution package.
+  Separately, `gcc` alone is not enough for the one C linker cargo needs
+  when the image is built with `--no-install-recommends`: `libc6-dev`
+  must be named explicitly, since `gcc` only recommends it rather than
+  depending on it, and without it linking fails with a missing
+  `crt1.o`/`crti.o` and C runtime libraries.
 
 ## Development environment
 

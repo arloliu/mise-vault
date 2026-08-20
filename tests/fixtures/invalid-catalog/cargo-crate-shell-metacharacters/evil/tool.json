@@ -1,0 +1,5 @@
+{
+  "name": "evil",
+  "type": "cargo",
+  "crate": "evil;rm -rf /"
+}

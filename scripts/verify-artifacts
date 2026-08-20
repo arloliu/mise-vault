@@ -21,16 +21,23 @@ For each catalog/<tool>/versions.json record:
       confirm the version is listed — missing fails the run.
       With --checksum there is nothing to compare either; reported as a
       skip, same as an h1-less go record.
+  cargo tools:
+    - GET the crate's index file at the registry's documented path and
+      confirm a non-yanked line for the version is present — missing
+      (or yanked-only) fails the run.
+      With --checksum there is nothing to compare either; reported as a
+      skip, same as an h1-less go record.
 
 Auth: curl -n (~/.netrc) plus $NEXUS_CURL_OPTS, same convention as add-version.
 The go proxy fetch is unauthenticated GET, same as any go-proxy client.
-The npm/pypi probes run through the user's environment too (curl honors
-http_proxy; auth rides the same -n/NEXUS_CURL_OPTS convention).
+The npm/pypi/cargo probes run through the user's environment too (curl
+honors http_proxy; auth rides the same -n/NEXUS_CURL_OPTS convention).
 
 Usage:
   scripts/verify-artifacts [--checksum] [--tool T ...]
                            [--nexus-url URL] [--goproxy-url URL]
                            [--npm-registry-url URL] [--pypi-index-url URL]
+                           [--cargo-index-url URL]
                            [--catalog-dir DIR]
 Exit code 0 = all verified, 1 = any failure.
 """
@@ -389,6 +396,165 @@ def probe_pypi_version(index, package, version):
     return f"PyPI simple index returned an unrecognized content type ({ctype or 'none'})", url
 
 
+# --- Shared cargo helpers: kept byte-identical between scripts/add-version
+# and scripts/verify-artifacts (see tests/run-approve-tests, which proves
+# this in-process). Only the network probe functions below this block
+# differ per script, matching the same split the npm/pypi helpers use. ---
+def cargo_crate_index_relpath(crate):
+    """The crate's path inside a cargo sparse/git index, keyed by name
+    length per the registry's documented layout: 1-char names under
+    "1/<name>", 2-char under "2/<name>", 3-char under
+    "3/<first-char>/<name>", longer under "<first-two>/<next-two>/<name>"
+    (e.g. tokei -> to/ke/tokei)."""
+    n = len(crate)
+    if n == 1:
+        return f"1/{crate}"
+    if n == 2:
+        return f"2/{crate}"
+    if n == 3:
+        return f"3/{crate[0]}/{crate}"
+    return f"{crate[0:2]}/{crate[2:4]}/{crate}"
+
+
+def cargo_normalize_index_url(url, label):
+    """A cargo registry index must be a "sparse+http(s)://" index: it is
+    the only index protocol a plain curl probe (or the plugin's runtime)
+    can speak. A git-index registry needs a git client to read, which is
+    out of scope here, so it is refused by name instead of mis-parsed.
+    Exactly the "sparse+" marker is stripped (never a generic prefix
+    strip), and the remainder gets the same URL-shape check used
+    everywhere else in this script."""
+    if not isinstance(url, str) or not url.startswith("sparse+"):
+        raise ValueError(
+            f"{label} is not a supported cargo index ({url!r}): only a "
+            f"sparse+http(s):// index is supported (a git-index registry "
+            f"needs a git client, which this script does not use)")
+    stripped = url[len("sparse+"):]
+    if not URL_RE.match(stripped):
+        raise ValueError(f"refusing unsafe {label}: {url!r}")
+    return stripped
+
+
+def cargo_config_index_url():
+    """Resolve the cargo index base URL from the user's own cargo
+    configuration, the same way "cargo install" itself would:
+    [source.crates-io] replace-with = "<name>" in ~/.cargo/config.toml (or
+    $CARGO_HOME/config.toml, which replaces the default path outright,
+    matching cargo's own CARGO_HOME precedence) points at
+    [registries.<name>].index. Absence of any config file, or a
+    [source.crates-io] section with the replace-with key entirely absent, is
+    not an error — it means the default public index applies, mirroring
+    cargo's own default. Once the key is present at all, the public default
+    is no longer an option: an empty string, a non-string value, or a name
+    with no matching [registries.<name>].index must all hard-error instead
+    of silently falling back to the public index, because the user's own
+    configuration is asking for something other than the default.
+    Returns (url, source) or (None, None) when there is no config at all."""
+    import os
+    import tomllib
+
+    home = os.environ.get("CARGO_HOME") or os.path.expanduser("~/.cargo")
+    config_path = os.path.join(home, "config.toml")
+    if not os.path.isfile(config_path):
+        return None, None
+    try:
+        with open(config_path, "rb") as f:
+            doc = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise ValueError(f"could not read cargo config {config_path}: {e}")
+    crates_io = (doc.get("source", {}) or {}).get("crates-io", {}) or {}
+    if "replace-with" not in crates_io:
+        return None, None
+    replace_with = crates_io["replace-with"]
+    if not isinstance(replace_with, str) or not replace_with:
+        raise ValueError(
+            f"{config_path} sets [source.crates-io] replace-with to "
+            f"{replace_with!r}, which is not a usable registry name — it must be "
+            f"a non-empty string, or the key must be absent entirely to use the "
+            f"default public index")
+    index = (doc.get("registries", {}) or {}).get(replace_with, {}).get("index")
+    if not index:
+        raise ValueError(
+            f"{config_path} sets [source.crates-io] replace-with = {replace_with!r} "
+            f"but there is no [registries.{replace_with}] index — fix the cargo "
+            f"config, or pass --cargo-index-url explicitly")
+    return index, f"{config_path} [source.crates-io] replace-with = {replace_with!r}"
+
+
+def cargo_index_url(override):
+    """Explicit --cargo-index-url wins outright (same precedence as
+    --nexus-url/--goproxy-url/--npm-registry-url/--pypi-index-url);
+    otherwise read the user's own cargo configuration; otherwise the
+    default public sparse index, matching cargo's own default when nothing
+    overrides it. Every candidate goes through the same sparse+ normalizer
+    before being returned, so a "wins outright" override cannot skip the
+    URL-shape check the other channels get."""
+    if override:
+        return (cargo_normalize_index_url(override, "--cargo-index-url"),
+                "explicit --cargo-index-url")
+    configured, source = cargo_config_index_url()
+    if configured:
+        return cargo_normalize_index_url(configured, "cargo config index"), source
+    return (cargo_normalize_index_url("sparse+https://index.crates.io/", "default cargo index"),
+            "default (index.crates.io)")
+
+
+def cargo_version_in_lines(body, version):
+    """Parse a cargo sparse/git index file (one JSON object per line, one
+    line per version) and look for the requested version. Returns
+    (found, checked_any): found is True only for a line whose "vers" field
+    equals the requested version AND whose "yanked" field is not true — a
+    yanked version cannot be installed ("cargo install" refuses it), so
+    treating it as present would let approval accept a version nothing can
+    actually install; refusing it at approval time is fail-closed, the same
+    stance the catalog takes everywhere else. checked_any is False when no
+    line in the body could be parsed as a JSON object with a "vers" field,
+    so the caller can tell "we looked and it is absent" from "this index's
+    response could not be read" — the latter must never be reported as
+    absence, the same distinction the PyPI filename fallback makes above."""
+    checked_any = False
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict) or "vers" not in rec:
+            continue
+        checked_any = True
+        if rec.get("vers") == version and rec.get("yanked") is not True:
+            return True, True
+    return False, checked_any
+# --- end shared cargo helpers ---
+
+
+def probe_cargo_version(index, crate, version):
+    """GET the crate's index file and look for the requested version; None
+    means it exists (and is not yanked). A 200 whose body has no parseable
+    version lines is reported as its own reason, distinct from "version not
+    listed" — never read a malformed or unreadable response as proof of
+    absence."""
+    url = f"{index.rstrip('/')}/{cargo_crate_index_relpath(crate)}"
+    r = curl(["-w", "\n%{http_code}", url])
+    if r.returncode != 0:
+        return f"unreachable (curl exit {r.returncode})", url
+    body, _, code = (r.stdout or "").rpartition("\n")
+    if code in ("404", "410"):
+        return f"crate not found at the cargo index (HTTP {code})", url
+    if code.startswith("3"):
+        return f"server redirected (HTTP {code}) — redirects are refused", url
+    if code != "200":
+        return f"unexpected HTTP {code}", url
+    found, checked_any = cargo_version_in_lines(body, version)
+    if not checked_any:
+        return "cargo index response had no parseable version lines", url
+    if found:
+        return None, url
+    return "version not listed in the cargo index (or listed only as yanked)", url
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checksum", action="store_true", help="download and verify sha256")
@@ -401,6 +567,10 @@ def main():
     ap.add_argument("--pypi-index-url",
                     help="pypi tools only: explicit override; else pip config get "
                          "global.index-url")
+    ap.add_argument("--cargo-index-url",
+                    help="cargo tools only: explicit override; else the index named by "
+                         "[source.crates-io] replace-with in ~/.cargo/config.toml (or "
+                         "$CARGO_HOME/config.toml), else the default public sparse index")
     ap.add_argument("--catalog-dir", default=str(REPO / "catalog"))
     args = ap.parse_args()
 
@@ -509,7 +679,7 @@ def main():
                     continue
                 print(f"skip sum check: {tool_name} {rec['version']} carries no checksum "
                       f"(npm is version-pin only — nothing to compare against)")
-                skip_reasons["npm/pypi records are version-pin only (no checksum to compare)"] += 1
+                skip_reasons["npm/pypi/cargo records are version-pin only (no checksum to compare)"] += 1
             continue
 
         if tool.get("type") == "pypi":
@@ -532,7 +702,28 @@ def main():
                     continue
                 print(f"skip sum check: {tool_name} {rec['version']} carries no checksum "
                       f"(pypi is version-pin only — nothing to compare against)")
-                skip_reasons["npm/pypi records are version-pin only (no checksum to compare)"] += 1
+                skip_reasons["npm/pypi/cargo records are version-pin only (no checksum to compare)"] += 1
+            continue
+
+        if tool.get("type") == "cargo":
+            crate = tool.get("crate", "")
+            try:
+                index, _source = cargo_index_url(args.cargo_index_url)
+            except ValueError as e:
+                sys.exit(f"error: {e}")
+            for rec in versions:
+                checked += 1
+                reason, url = probe_cargo_version(index, crate, rec["version"])
+                if reason is not None:
+                    print(f"FAIL {reason}: {url}")
+                    failures += 1
+                    continue
+                if not args.checksum:
+                    print(f"ok   exists:  {tool_name} {rec['version']} (cargo index)")
+                    continue
+                print(f"skip sum check: {tool_name} {rec['version']} carries no checksum "
+                      f"(cargo is version-pin only — nothing to compare against)")
+                skip_reasons["npm/pypi/cargo records are version-pin only (no checksum to compare)"] += 1
             continue
 
         if not nexus:

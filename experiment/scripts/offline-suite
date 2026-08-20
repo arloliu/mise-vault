@@ -212,6 +212,43 @@ if ruff_uv_ok:
 else:
     s.bad(f"ruff install via uv ({install_r.tail()})")
 
+s.phase("2c. cargo tool type with zero public internet")
+
+# Same reasoning as 2b: no MISE_VAULT_*_REGISTRY channel for cargo either,
+# so this container's own USER-ENV ~/.cargo/config.toml source-replaces
+# crates-io with the private Nexus cargo proxy — this repository format is
+# unconditionally supported (confirmed against this experiment's Nexus CE
+# build), so unlike an earlier draft of this design there is no online-only
+# fallback to carry here.
+CARGO_PROXY_HOST_URL = f"{NEXUS_CONTAINER_URL}/repository/cargo-proxy"
+cargo_dir = HOME / ".cargo"
+cargo_dir.mkdir(parents=True, exist_ok=True)
+(cargo_dir / "config.toml").write_text(
+    '[source.crates-io]\n'
+    'replace-with = "nexus-cargo"\n'
+    '\n'
+    '[registries.nexus-cargo]\n'
+    f'index = "sparse+{CARGO_PROXY_HOST_URL}/"\n')
+
+aliases["tokei"] = "vault:tokei"
+write_aliases(HOME, aliases)
+
+TOKEI_V = safe_latest("tokei", "/tmp/bootstrap")
+
+# cargo compiles from source every run (this container's CARGO_HOME never
+# persists a build cache across runs), so this gets a longer timeout than
+# the default 120s the way the poc-test suite's cargo checks do.
+install_r = run(["mise", "install", f"tokei@{TOKEI_V}"], env=ENV, timeout=300)
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"tokei@{TOKEI_V}", "--", "tokei", "--version"], env=ENV)
+    tokei_ok = bool(TOKEI_V) and exec_r.ok and TOKEI_V in exec_r.out
+else:
+    tokei_ok = False
+if tokei_ok:
+    s.ok("tokei built via cargo (full dependency closure from private cargo-proxy)")
+else:
+    s.bad(f"tokei install ({install_r.tail()})")
+
 s.phase("3. catalog-only policy holds offline")
 
 # assert the EFFECT (command fails, no versions listed), not mise's wording
