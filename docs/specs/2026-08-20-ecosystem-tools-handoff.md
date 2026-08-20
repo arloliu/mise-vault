@@ -1,4 +1,4 @@
-# Handoff: implement the ecosystem tool types (cargo, npm/bun, pip/uv)
+# Handoff: implement the ecosystem tool types (cargo, npm, pypi)
 
 Written 2026-08-20 for a fresh conversation to start implementation.
 Read this file, the design spec next to it
@@ -7,12 +7,12 @@ and AGENTS.md before writing any code.
 
 ## Where the repository stands
 
-- Branch `feat/go-install-tools`, commit `10ee3b6`
-  (plus the docs commit that added this handoff),
-  contains the fully landed **go-installed tool type** —
+- `main` contains the fully landed **go-installed tool type**
+  (code commit `10ee3b6`, merged fast-forward on 2026-08-20) —
   the direct template for this work.
-  Not yet merged to `main`; decide with the user whether to merge first
-  or stack the new work on top.
+- The active branch for this feature is `feat/ecosystem-tools`,
+  branched from `main`;
+  it carries the design spec, this handoff, and their amendments.
 - Every gate is green at that commit:
   poc-test 41/41, run-validator-tests 42/42, run-approve-tests 46/46,
   run-harness-selftest OK, validate-catalog OK (both engines),
@@ -23,8 +23,8 @@ and AGENTS.md before writing any code.
 - The go feature went through nine rounds of external review;
   everything it surfaced is fixed or recorded as a documented limitation.
   The durable lessons all live in AGENTS.md ("Lessons learned") and in
-  `docs/research/SYNTHESIS.md` (decision D26 covers the whole
-  hardening arc).
+  `docs/research/SYNTHESIS.md`,
+  whose final entries record that hardening arc.
 
 ## What to build
 
@@ -39,9 +39,10 @@ Version-pin-only integrity (no h1 analogue exists);
 the approved-version list stays the boundary.
 Rollout: Phase A npm+pypi, Phase B cargo, Phase C bun runner.
 
-**Before writing code, resolve the four open questions at the end of the
-design spec with the user** — especially the real example tools
-(the spec's ripgrep/typescript/ruff are placeholders).
+All open questions at the end of the design spec were resolved with
+the user on 2026-08-20 (see the spec's section 10).
+The confirmed first tools are tokei (cargo), prettier (npm),
+and ruff (pypi).
 
 ## Files you will touch (mirror the go-type diff of commit 10ee3b6)
 
@@ -64,8 +65,24 @@ design spec with the user** — especially the real example tools
 - `experiment/scripts/provision-nexus.sh`, `seed-artifacts.sh`,
   `offline-suite` — npm/pypi proxy repos and cache warming
   (cargo pending the Nexus CE format check).
-- `docs/development.md`, `docs/design.md`, AGENTS.md fail-closed bullet,
-  `docs/research/SYNTHESIS.md` — same documentation trail the go type has.
+- Documentation trail, mirroring the go type's:
+  `docs/development.md`, `docs/design.md`,
+  `docs/research/SYNTHESIS.md` —
+  and, because the design revises the network principle for these
+  types, every place that states the absolute never-public rule must
+  gain the scoped exception without weakening it for artifact and go
+  installs.
+  Known locations:
+  the AGENTS.md intro sentence ("never fall back to GitHub, public
+  registries…"), the AGENTS.md fail-closed bullet,
+  the AGENTS.md lesson stating that never-contact-the-internet is
+  enforced by the plugin constructing only Nexus URLs,
+  the header comment of `hooks/backend_install.lua`,
+  and `docs/design.md`, which repeats the absolute rule in its
+  overview, its network section, and its proof-of-concept criteria.
+  That list is a starting point, not the boundary:
+  finish with a repository-wide search for absolute network claims
+  (for example "never", "only Nexus") and amend each hit.
 
 ## Hard-won gotchas (verified this week; do not rediscover them)
 
