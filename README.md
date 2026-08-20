@@ -100,9 +100,9 @@ install prebuilt packages and stay fast.
 |---|---|
 | npm | `.npmrc` (`registry`, scoped or default) |
 | bun (opt-in npm runner) | `.npmrc` (`registry`) — the same file the npm runner reads; verified on bun 1.3.14. `.npmrc` support varies across older bun versions, and the plugin cannot observe which registry bun actually reached — use a verified bun version; the test suites' registry differential is what verifies this channel, and network egress policy is what keeps a public registry unreachable in production |
-| pipx (default pypi runner) | `pip.conf` (`index-url`, `trusted-host`) — pipx installs through pip, so it inherits pip's configuration with no separate setup |
+| pipx (default pypi runner) | `pip.conf` (`index-url`, `trusted-host`) — pipx installs through pip, so it inherits pip's configuration with no separate setup. For a plain-http index, `trusted-host` must name exactly the host in `index-url`; pip refuses the index otherwise |
 | uv (opt-in pypi runner) | Its own configuration only — user-level `~/.config/uv/uv.toml` (`index-url` or `[[index]]`) or `UV_DEFAULT_INDEX`/`UV_INSECURE_HOST`. A project-local `uv.toml` is ignored for `uv tool` commands. A plain-http index additionally needs `allow-insecure-host = ["<host>"]` (a list, host must match the index host) |
-| cargo (the only runner for a cargo tool) | `~/.cargo/config.toml` `[source.crates-io]` `replace-with`, pointing at a matching `[registries.<name>]` `index` — only a `sparse+http(s)://` index is supported; a git-index registry is rejected at approval time |
+| cargo (the only runner for a cargo tool) | `~/.cargo/config.toml` `[source.crates-io]` `replace-with`, pointing at a matching `[registries.<name>]` `index` — only a `sparse+http(s)://` index is supported; a git-index registry is rejected at approval time. If cargo must reach that index through an outbound HTTP proxy, the key is `proxy` under `[http]` in the same file — cargo has no `[net] proxy` key, and a value placed there is silently ignored |
 
 If your runner is not already configured for one of these ecosystems,
 configure it the way that ecosystem documents — this plugin adds no
