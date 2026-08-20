@@ -6,6 +6,11 @@
 #   GOPROXY_URL (optional)             — overrides config/defaults.json's
 #     goproxy_url, same idea as NEXUS_URL below, for a CI network where the
 #     go proxy lives under a different address than workstations use
+#   NPM_REGISTRY_URL / PYPI_INDEX_URL / CARGO_INDEX_URL (optional) — the
+#     registry endpoints the npm/pypi/cargo existence probes ask; CI job
+#     images carry no npm or pip configuration to fall back on, so a
+#     catalog with tools of those types needs these set (point them at
+#     the same private proxies workstations use)
 
 stages:
   - validate
@@ -26,6 +31,11 @@ validate-catalog:
   stage: validate
   image: $PYTHON_SLIM_IMAGE
   script:
+    # the approve/add-version probe tests shell out to curl, which the
+    # slim image does not ship; on a sealed runner with no public APT
+    # mirrors, point PYTHON_SLIM_IMAGE at an internal image that already
+    # ships curl — this fallback only runs when the image has none
+    - command -v curl >/dev/null || (apt-get update -qq && apt-get install -qq -y curl)
     - pip install --quiet jsonschema        # formal schema engine in CI
     - scripts/validate-catalog
     # the validator must also provably REJECT unsafe catalog shapes
@@ -48,7 +58,7 @@ verify-artifacts-exist:
   stage: verify
   image: $PYTHON_IMAGE                     # full image ships curl
   script:
-    - scripts/verify-artifacts ${NEXUS_URL:+--nexus-url $NEXUS_URL} ${GOPROXY_URL:+--goproxy-url $GOPROXY_URL}
+    - scripts/verify-artifacts ${NEXUS_URL:+--nexus-url $NEXUS_URL} ${GOPROXY_URL:+--goproxy-url $GOPROXY_URL} ${NPM_REGISTRY_URL:+--npm-registry-url $NPM_REGISTRY_URL} ${PYPI_INDEX_URL:+--pypi-index-url $PYPI_INDEX_URL} ${CARGO_INDEX_URL:+--cargo-index-url $CARGO_INDEX_URL}
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -58,6 +68,8 @@ verify-artifacts-exist:
 # A go toolchain is required here, and only here: with --checksum, every go
 # tool version that carries an h1 gets verified with "go mod download",
 # exactly like the plugin itself does at install time.
+# --checksum also compares every hashed pypi record's full digest set
+# against the simple index (curl only, no extra toolchain).
 # A version without an h1 is a deliberate proxy-trust entry and is reported,
 # not failed — see docs/development.md's go-installed tools section.
 verify-artifacts-checksum:
@@ -69,7 +81,7 @@ verify-artifacts-checksum:
   before_script:
     - command -v go >/dev/null || (apt-get update -qq && apt-get install -qq -y golang-go)
   script:
-    - scripts/verify-artifacts --checksum ${NEXUS_URL:+--nexus-url $NEXUS_URL} ${GOPROXY_URL:+--goproxy-url $GOPROXY_URL}
+    - scripts/verify-artifacts --checksum ${NEXUS_URL:+--nexus-url $NEXUS_URL} ${GOPROXY_URL:+--goproxy-url $GOPROXY_URL} ${NPM_REGISTRY_URL:+--npm-registry-url $NPM_REGISTRY_URL} ${PYPI_INDEX_URL:+--pypi-index-url $PYPI_INDEX_URL} ${CARGO_INDEX_URL:+--cargo-index-url $CARGO_INDEX_URL}
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       changes: [ "catalog/**/*" ]

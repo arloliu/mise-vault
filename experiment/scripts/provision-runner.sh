@@ -39,6 +39,10 @@ setvar() { # key value
 setvar NEXUS_CI_USER developer
 setvar NEXUS_CI_PASSWORD dev-mise-vault
 setvar NEXUS_URL http://nexus:8081/repository/devtools
+setvar GOPROXY_URL http://nexus:8081/repository/go-proxy
+setvar NPM_REGISTRY_URL http://nexus:8081/repository/npm-proxy/
+setvar PYPI_INDEX_URL http://nexus:8081/repository/pypi-proxy/simple
+setvar CARGO_INDEX_URL sparse+http://nexus:8081/repository/cargo-proxy/
 setvar DEVTOOLS_CI_IMAGE mise-vault-test
 
 log "runner provisioning complete"
