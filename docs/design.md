@@ -73,8 +73,9 @@ this document states the resulting rules in plain language.
     boundary, the same role it already plays for an `h1`-less go
     record.
     Routing is unchanged (`vault:<tool>`, package name in `tool.json`).
-    cargo (Phase B, item 11 below) followed the same pattern; a bun
-    runner (Phase C) remains planned.
+    cargo (Phase B, item 11 below) followed the same pattern; the bun
+    runner (Phase C, item 12 below) landed the same way, as npm's
+    opt-in second runner.
 11. **A third ecosystem tool type landed: cargo (Phase B of the
     ecosystem tool types; the "Ecosystem-Installed Tools" worked
     example in section 14.5 now covers all three).**
@@ -90,6 +91,17 @@ this document states the resulting rules in plain language.
     runner-selection variable, because cargo is the only tool that can
     build a crate from source — there is nothing to choose between.
     Routing and field-grammar shape are unchanged from Phase A.
+12. **The npm type gained a second, opt-in runner: bun (Phase C of the
+    ecosystem tool types).**
+    Selected with `MISE_VAULT_NPM_RUNNER=bun` (default stays `npm`),
+    it installs with `bun add -g <package>@<version>`,
+    reads its registry from the same channel npm reads
+    (`.npmrc` `registry`),
+    and places the global install with its own
+    `BUN_INSTALL_GLOBAL_DIR`/`BUN_INSTALL_BIN` variables —
+    verified on bun 1.3.14.
+    No new catalog surface: bun installs the same npm tool records
+    Phase A introduced.
 
 ## 1. Overview
 
@@ -1153,10 +1165,9 @@ The environment then exposes just:
 PATH=<install_path>/bin
 ```
 
-Full field grammars, the per-runner environment-variable table, the
-registry-probe conventions `scripts/add-version` uses, and the
-remaining rollout phase (the bun runner) are authoritative in
-`docs/specs/2026-08-20-ecosystem-tools-design.md`;
+Full field grammars, the per-runner environment-variable table, and the
+registry-probe conventions `scripts/add-version` uses are authoritative
+in `docs/specs/2026-08-20-ecosystem-tools-design.md`;
 this section states the resulting shape, not the detail.
 
 ---

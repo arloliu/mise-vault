@@ -260,6 +260,13 @@ The operative rules:
   must be named explicitly, since `gcc` only recommends it rather than
   depending on it, and without it linking fails with a missing
   `crt1.o`/`crti.o` and C runtime libraries.
+- **bun 1.3.14 honors `BUN_INSTALL_GLOBAL_DIR`/`BUN_INSTALL_BIN` placement
+  and reads `~/.npmrc`'s registry.**
+  Its manifest cache is keyed by registry host and revalidated,
+  so a warm cache cannot defeat a broken-registry differential.
+  Its official installer needs `unzip`
+  and lands the binary at `$BUN_INSTALL/bin/bun`
+  (the test image pins `BUN_INSTALL=/usr/local`).
 
 ## Development environment
 

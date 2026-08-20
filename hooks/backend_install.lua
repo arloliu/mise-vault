@@ -3,8 +3,8 @@
 ---     download (curl -n) -> mandatory SHA-256 verification -> extract -> install_path.
 ---   go tools: catalog lookup -> "go install <module>@v<version>" against the
 ---     plugin-controlled go proxy, with an optional module checksum check first.
----   npm/pypi/cargo tools: catalog lookup -> the selected runner (npm; pipx or uv;
----     cargo) installs the pinned package version straight into install_path/bin,
+---   npm/pypi/cargo tools: catalog lookup -> the selected runner (npm or bun;
+---     pipx or uv; cargo) installs the pinned package version straight into install_path/bin,
 ---     reading whatever registry/proxy/auth configuration the user's own
 ---     environment already has — the plugin does not construct or control that
 ---     network path the way it does for artifact and go installs
@@ -233,19 +233,14 @@ end
 --- silently from one runner to another. cargo has no MISE_VAULT_CARGO_RUNNER:
 --- cargo is always the runner, since it is the only tool that can build a
 --- crate from source (see install_cargo_tool below).
---- MISE_VAULT_NPM_RUNNER: "npm" (default) or "bun". "bun" is recognized but
---- rejected with its own message until the bun runner ships (Phase C) — a
---- distinct error from an unrecognized value.
+--- MISE_VAULT_NPM_RUNNER: "npm" (default) or "bun".
 local function npm_runner_choice()
     local r = os.getenv("MISE_VAULT_NPM_RUNNER")
     if r == nil or r == "" then
         return "npm"
     end
-    if r == "npm" then
-        return "npm"
-    end
-    if r == "bun" then
-        error("MISE_VAULT_NPM_RUNNER=bun: the bun runner is not yet supported")
+    if r == "npm" or r == "bun" then
+        return r
     end
     error("MISE_VAULT_NPM_RUNNER has an unknown value: " .. r .. " (expected npm or bun)")
 end
@@ -274,9 +269,9 @@ end
 --- message text is unchanged.
 local function require_runner(bin_name, cmd, strings, common, extra_guidance)
     -- bin_name is always one of this file's own literal runner names
-    -- ("npm", "pipx", "uv", "cargo"), never catalog or environment data, but
-    -- every interpolated value is shell-quoted anyway, the same defense in
-    -- depth every other command in this file uses.
+    -- ("npm", "bun", "pipx", "uv", "cargo"), never catalog or environment
+    -- data, but every interpolated value is shell-quoted anyway, the same
+    -- defense in depth every other command in this file uses.
     local out = cmd.exec("command -v " .. common.shell_quote(bin_name) .. " 2>&1 || true")
     if strings.trim_space(out) == "" then
         error(bin_name .. " was not found on PATH — install it and ensure it is on PATH, " ..
@@ -298,7 +293,7 @@ local function missing_bin_error(runner, bin_name, bin_dir)
 end
 
 --- Install a tool published to the npm registry, via the runner selected by
---- MISE_VAULT_NPM_RUNNER (npm by default). linux/darwin only: npm on Windows
+--- MISE_VAULT_NPM_RUNNER (npm by default, bun opt-in). linux/darwin only: npm on Windows
 --- places global executables directly in the prefix rather than in
 --- <prefix>/bin, and this plugin carries no per-platform catalog data for
 --- these types that could encode such a difference, so unsupported
@@ -323,47 +318,81 @@ local function install_npm_tool(ctx, tool, vrec, common, cmd, strings)
     local runner = npm_runner_choice()
     require_runner(runner, cmd, strings, common)
 
-    -- Unlike the go branch, npm writes only under install_path (via
-    -- --prefix below); nothing is cached under ctx.download_path, so
-    -- there is no equivalent leftover-cache directory to clear here.
+    -- Unlike the go branch, npm/bun write only under install_path (via
+    -- --prefix for npm, via BUN_INSTALL_GLOBAL_DIR/BUN_INSTALL_BIN for bun);
+    -- nothing is cached under ctx.download_path, so there is no equivalent
+    -- leftover-cache directory to clear here.
     -- A stale bin_dir/bin_name from a prior failed attempt at the same
     -- install_path would still satisfy the post-install existence check
     -- below, exactly the same residual exposure install_go_tool already
     -- carries for its own binary output.
     local bin_dir = file.join_path(ctx.install_path, "bin")
-    -- Pure noise suppression, not policy: audit endpoints are typically
-    -- absent on private registry proxies, so the audit call is noise at
-    -- best and an error at worst.
-    local npm_env = "NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false " ..
-        "NPM_CONFIG_AUDIT=false"
+    local spec = q(tool.package .. "@" .. ctx.version)
+    local out
 
-    -- Display only, never validated: helps diagnose which registry an
-    -- install actually reached, without altering or trusting the value.
-    local registry = strings.trim_space(cmd.exec(
-        npm_env .. " npm config get registry 2>&1 || true"))
-    print("mise-vault: installing " .. tool.package .. "@" .. ctx.version ..
-          " via npm (registry: " .. registry .. ")")
+    if runner == "npm" then
+        -- Pure noise suppression, not policy: audit endpoints are typically
+        -- absent on private registry proxies, so the audit call is noise at
+        -- best and an error at worst.
+        local npm_env = "NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false " ..
+            "NPM_CONFIG_AUDIT=false"
 
-    -- Success is judged by an unconditional numeric exit-status trailer
-    -- printed as the very last line, never a fixed success word: install
-    -- output is attacker-influenced text (a failing postinstall script can
-    -- print anything), and only the final trailer line is read.
-    -- mise's cmd.exec shell aborts on the first unguarded nonzero status,
-    -- so every step here is guarded.
-    local out = cmd.exec(
-        "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. npm_env ..
-        " npm install -g --prefix " .. q(ctx.install_path) .. " " ..
-        q(tool.package .. "@" .. ctx.version) .. " 2>&1 || st=$?; } && echo \"NPMINSTALL_EXIT=$st\"")
-    local status = out:match("NPMINSTALL_EXIT=(%d+)%s*$")
-    if status ~= "0" then
-        local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
-        error("npm install failed for " .. ctx.tool .. " " .. ctx.version ..
-              (detail ~= "" and (": " .. detail) or ""))
+        -- Display only, never validated: helps diagnose which registry an
+        -- install actually reached, without altering or trusting the value.
+        local registry = strings.trim_space(cmd.exec(
+            npm_env .. " npm config get registry 2>&1 || true"))
+        print("mise-vault: installing " .. tool.package .. "@" .. ctx.version ..
+              " via npm (registry: " .. registry .. ")")
+
+        -- Success is judged by an unconditional numeric exit-status trailer
+        -- printed as the very last line, never a fixed success word: install
+        -- output is attacker-influenced text (a failing postinstall script can
+        -- print anything), and only the final trailer line is read.
+        -- mise's cmd.exec shell aborts on the first unguarded nonzero status,
+        -- so every step here is guarded.
+        out = cmd.exec(
+            "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. npm_env ..
+            " npm install -g --prefix " .. q(ctx.install_path) .. " " ..
+            spec .. " 2>&1 || st=$?; } && echo \"NPMINSTALL_EXIT=$st\"")
+        local status = out:match("NPMINSTALL_EXIT=(%d+)%s*$")
+        if status ~= "0" then
+            local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
+            error("npm install failed for " .. ctx.tool .. " " .. ctx.version ..
+                  (detail ~= "" and (": " .. detail) or ""))
+        end
+    else
+        -- BUN_INSTALL_GLOBAL_DIR/BUN_INSTALL_BIN pin bun's global install
+        -- (package tree, lockfile, and bin symlinks) under install_path so
+        -- nothing lands in the user's home directory (verified on bun
+        -- 1.3.14). DO_NOT_TRACK=1 disables bun's telemetry, pure noise
+        -- suppression, not policy.
+        local bun_env = "BUN_INSTALL_GLOBAL_DIR=" .. q(ctx.install_path) ..
+            " BUN_INSTALL_BIN=" .. q(bin_dir) .. " DO_NOT_TRACK=1"
+
+        -- bun has no equivalent of "npm config get registry" to report (it
+        -- reads the environment's own npm registry configuration —
+        -- ~/.npmrc, verified on bun 1.3.14); printing nothing is better
+        -- than printing something wrong.
+        print("mise-vault: installing " .. tool.package .. "@" .. ctx.version .. " via bun")
+
+        -- Same trailer discipline as every other runner in this file: the
+        -- last line is an unconditional numeric exit-status marker, never a
+        -- fixed success word, because install output is attacker-influenced
+        -- text.
+        out = cmd.exec(
+            "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. bun_env ..
+            " bun add -g " .. spec .. " 2>&1 || st=$?; } && echo \"BUNINSTALL_EXIT=$st\"")
+        local status = out:match("BUNINSTALL_EXIT=(%d+)%s*$")
+        if status ~= "0" then
+            local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
+            error("bun add failed for " .. ctx.tool .. " " .. ctx.version ..
+                  (detail ~= "" and (": " .. detail) or ""))
+        end
     end
 
     local bin_path = file.join_path(bin_dir, bin_name)
     if not file.exists(bin_path) then
-        error(missing_bin_error("npm", bin_name, bin_dir))
+        error(missing_bin_error(runner, bin_name, bin_dir))
     end
 
     return {}

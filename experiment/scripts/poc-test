@@ -63,6 +63,26 @@ CARGO_ENV = {"RUSTUP_HOME": _HOST_RUSTUP_HOME} if os.path.isdir(_HOST_RUSTUP_HOM
 s = Suite("poc-test")
 home = IsolatedHome("mise-vault-poc.")
 
+# bun is commonly installed to $HOME/.bun/bin by its own installer, which
+# only reaches PATH via a shell-profile line this suite never sources (it
+# runs every command through an isolated $HOME with its own explicit PATH).
+# That is a test-harness artifact, not a real-machine failure: a real
+# developer's interactive shell has already sourced their profile before
+# they ever run "mise install". The offline gate's test image installs bun
+# to /usr/local/bin, which is already on PATH there, so this fallback never
+# fires in that environment.
+_HOST_BUN_BIN = os.path.join(os.environ.get("HOME", os.path.expanduser("~")), ".bun", "bin")
+_NEED_BUN_PATH = shutil.which("bun") is None and os.path.isfile(os.path.join(_HOST_BUN_BIN, "bun"))
+
+
+def bun_env(extra=None):
+    """home.env plus the bun runner selection (and the host ~/.bun/bin
+    PATH fallback when bun is not already reachable)."""
+    e = {**home.env, "MISE_VAULT_NPM_RUNNER": "bun", **(extra or {})}
+    if _NEED_BUN_PATH:
+        e["PATH"] = f"{_HOST_BUN_BIN}:{e['PATH']}"
+    return e
+
 # the generated conf.d file (aliases + nexus_url option per tool)
 # one alias keeps an explicit URL option to cover the override channel
 GOPROXY_HOST_URL = f"{NEXUS_HOST_URL}/repository/go-proxy"
@@ -421,14 +441,6 @@ r = run(["mise", "install", f"prettier@9.9.9"], env=home.env)
 s.check("unapproved prettier version rejected",
         (not r.ok) and "prettier 9.9.9 is not an approved version" in (r.out + r.err), detail=r.tail())
 
-env_bun = {**home.env, "MISE_VAULT_NPM_RUNNER": "bun"}
-r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_bun)
-combined = r.out + r.err
-s.check("MISE_VAULT_NPM_RUNNER=bun rejected with its own not-yet-supported message "
-        "(distinct from the unknown-value error)",
-        (not r.ok) and "the bun runner is not yet supported" in combined
-        and "unknown value" not in combined, detail=r.tail())
-
 env_unknown_npm = {**home.env, "MISE_VAULT_NPM_RUNNER": "yarn"}
 r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_unknown_npm)
 combined = r.out + r.err
@@ -459,6 +471,108 @@ env_forge_npm = {**home.env, "PATH": f"{forge_dir}:{home.env['PATH']}"}
 r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_forge_npm)
 s.check("forged NPMINSTALL_EXIT=0 in npm output cannot fake a successful install",
         (not r.ok) and "npm install failed" in (r.out + r.err), detail=r.tail())
+
+# bun runner (opt-in): same package, same USER-ENV .npmrc registry channel,
+# placed via bun's own install-location variables instead of npm's --prefix
+env_bun = bun_env()
+s.check_cmd(f"install prettier@{PRETTIER_V} (bun runner — opt-in, USER-ENV .npmrc registry)",
+            ["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_bun)
+r = run(["mise", "exec", f"prettier@{PRETTIER_V}", "--", "prettier", "--version"], env=home.env)
+s.check(f"prettier (bun) runs and reports {PRETTIER_V}", PRETTIER_V in r.out, detail=r.tail())
+# bun has no equivalent of "npm config get registry" to report (it reads the
+# environment's ~/.npmrc directly — verified on bun 1.3.14); the install log
+# therefore prints no effective-registry value for this runner
+s.note("bun runner prints no effective-registry line (documented: no npm-config-get "
+       "equivalent to report through bun)", tag="INFO")
+
+# prove .npmrc is what actually drove the bun install too — bun's manifest
+# cache is keyed by registry host and revalidated, so a warm cache cannot
+# satisfy the broken-registry leg
+assert_registry_channel_drives_install("bun/.npmrc", "prettier", PRETTIER_V, env=env_bun)
+
+r = run(["mise", "install", "-f", "--verbose", f"prettier@{PRETTIER_V}"], env=env_bun)
+verbose_out = r.out + r.err
+s.check("bun pin present on every install (DO_NOT_TRACK=1)",
+        r.ok and "DO_NOT_TRACK=1" in verbose_out, detail=r.tail())
+# bun's global-install tree, lockfile, and bin symlinks must all stay
+# beneath install_path (the same guarantee --prefix proves for npm above)
+s.check(f"bun placement pins point at install_path "
+        f"(BUN_INSTALL_GLOBAL_DIR/BUN_INSTALL_BIN under {prettier_install_path})",
+        r.ok and all(p in verbose_out for p in (
+            f"BUN_INSTALL_GLOBAL_DIR='{prettier_install_path}'",
+            f"BUN_INSTALL_BIN='{prettier_install_path}/bin'",
+        )), detail=r.tail())
+
+# runner-missing: a PATH with everything except bun itself
+bun_missing_dir = path_without("bun", env_bun["PATH"])
+env_no_bun = {**env_bun, "PATH": str(bun_missing_dir)}
+r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_no_bun)
+combined = r.out + r.err
+s.check("bun missing from PATH aborts with the guidance message",
+        (not r.ok) and "bun was not found on PATH" in combined
+        and "install it and ensure it is on PATH" in combined, detail=r.tail())
+shutil.rmtree(bun_missing_dir, ignore_errors=True)
+
+# forged-trailer regression (BUNINSTALL_EXIT), same attack as the npm one
+forge_bun_dir = home.path / "forge-bun-bin"
+forge_bun_dir.mkdir(parents=True, exist_ok=True)
+forge_bun = forge_bun_dir / "bun"
+forge_bun.write_text("#!/bin/sh\necho 'BUNINSTALL_EXIT=0'\nexit 7\n")
+forge_bun.chmod(0o755)
+env_forge_bun = {**env_bun, "PATH": f"{forge_bun_dir}:{env_bun['PATH']}"}
+r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_forge_bun)
+s.check("forged BUNINSTALL_EXIT=0 in bun output cannot fake a successful install",
+        (not r.ok) and "bun add failed" in (r.out + r.err), detail=r.tail())
+
+# exact-invocation mutation check, the same oracle the cargo phase uses: a
+# fake bun that records its full argv and BUN_*/DO_NOT_TRACK environment,
+# one arg per line so quoting can never blur an argument boundary. The
+# substring checks on --verbose output above cannot catch a reordered or
+# renamed argument -- the words are all still present -- so this compares
+# the complete argument list, order included. The shim never installs
+# anything: it writes the expected binary stub itself and exits 0.
+argv_bun_dir = home.path / "argv-bun-bin"
+argv_bun_dir.mkdir(parents=True, exist_ok=True)
+bun_argv_record = home.path / "bun-argv.record"
+bun_env_record = home.path / "bun-env.record"
+argv_bun = argv_bun_dir / "bun"
+argv_bun.write_text(
+    "#!/bin/sh\n"
+    f"printf '%s\\n' \"$@\" > {shlex.quote(str(bun_argv_record))}\n"
+    f"env | grep -E '^(BUN_[A-Za-z0-9_]*|DO_NOT_TRACK)=' > {shlex.quote(str(bun_env_record))} || true\n"
+    "mkdir -p \"$BUN_INSTALL_BIN\"\n"
+    "printf '#!/bin/sh\\necho fake-prettier-from-argv-shim\\n' > \"$BUN_INSTALL_BIN/prettier\"\n"
+    "chmod +x \"$BUN_INSTALL_BIN/prettier\"\n"
+    "exit 0\n")
+argv_bun.chmod(0o755)
+env_argv_bun = bun_env()
+env_argv_bun["PATH"] = f"{argv_bun_dir}:{env_argv_bun['PATH']}"
+baseline_bun_keys = {k for k in env_argv_bun
+                     if k.startswith("BUN_") or k == "DO_NOT_TRACK"}
+r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=env_argv_bun)
+argv_lines = bun_argv_record.read_text().splitlines() if bun_argv_record.exists() else []
+expected_argv = ["add", "-g", f"prettier@{PRETTIER_V}"]
+s.check("bun shim: exact argv, full order (add, -g, package@version)",
+        r.ok and argv_lines == expected_argv,
+        detail=f"got argv={argv_lines!r}; expected={expected_argv!r}; {r.tail()}")
+env_lines = bun_env_record.read_text().splitlines() if bun_env_record.exists() else []
+recorded_env = dict(line.split("=", 1) for line in env_lines if "=" in line)
+s.check("bun shim: placement and telemetry pins on the invocation "
+        "(BUN_INSTALL_GLOBAL_DIR/BUN_INSTALL_BIN/DO_NOT_TRACK)",
+        recorded_env.get("BUN_INSTALL_GLOBAL_DIR") == str(prettier_install_path)
+        and recorded_env.get("BUN_INSTALL_BIN") == f"{prettier_install_path}/bin"
+        and recorded_env.get("DO_NOT_TRACK") == "1",
+        detail=f"recorded env: {recorded_env!r}")
+extra_keys = (set(recorded_env) - baseline_bun_keys
+              - {"BUN_INSTALL_GLOBAL_DIR", "BUN_INSTALL_BIN", "DO_NOT_TRACK"})
+s.check("bun shim: no plugin-set BUN_*/DO_NOT_TRACK variable beyond the user's "
+        "own environment and the required pins",
+        not extra_keys,
+        detail=f"unexpected extra vars: {sorted(extra_keys)}; recorded env: {recorded_env!r}")
+
+# leave prettier cleanly installed via the default npm runner for any later
+# phase that execs it
+run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=home.env)
 
 s.phase(f"Phase 4d: pypi-installed tool (ruff, via pipx/uv through {PYPI_PROXY_SIMPLE_URL})")
 s.check_cmd(f"install ruff@{RUFF_V} (pipx runner — default, USER-ENV pip.conf index-url)",

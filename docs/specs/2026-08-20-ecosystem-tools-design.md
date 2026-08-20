@@ -1,9 +1,9 @@
 # Ecosystem tool types: cargo, npm, pypi — design
 
 Status: APPROVED 2026-08-20.
-Phases A (npm + pypi) and B (cargo) are implemented;
+Phases A (npm + pypi), B (cargo), and C (the bun runner) are all
+implemented;
 see the implementation notes at the end of this document.
-Phase C (the bun runner) remains future work.
 Amended later the same day
 after reviewing the real private-network registry configuration:
 pipx became the default pypi runner,
@@ -65,12 +65,10 @@ and adding a tool means adding catalog data, never tool-specific code.
    after the uv configuration surfaced.
    An unknown value, or a selected runner missing from PATH, aborts;
    there is never a silent fallback to the other runner.
-   Until the bun runner ships (Phase C),
-   `MISE_VAULT_NPM_RUNNER=bun` is recognized but rejected with its
-   own message naming the limitation
-   ("the bun runner is not yet supported"),
-   distinct from the unknown-value error;
-   Phase C then replaces that rejection with the real branch,
+   Before the bun runner shipped,
+   `MISE_VAULT_NPM_RUNNER=bun` was recognized but rejected
+   with its own message naming the limitation;
+   Phase C replaced that rejection with the real branch,
    leaving the accepted-value set unchanged.
 
 ## 3. Catalog shapes
@@ -361,8 +359,10 @@ that toolchain documents.
 Each runner reads its registry from a different channel,
 and they do not share configuration:
 npm reads `.npmrc`;
-bun reads `bunfig.toml`
-(recent bun versions read a subset of `.npmrc` — verify in Phase C);
+bun reads `.npmrc` too
+(verified on bun 1.3.14 — `bunfig.toml`, bun's own native channel,
+was not needed on that version;
+see the Phase C implementation notes);
 pip and pipx read `pip.conf`;
 uv reads only its own settings (`UV_DEFAULT_INDEX`, `uv.toml`);
 cargo reads `~/.cargo/config.toml` source replacement.
@@ -639,3 +639,42 @@ point.
    same proxy, so the fallback plan was never needed — the cargo case
    runs end-to-end through the experiment Nexus and joins the offline
    gate unconditionally, the same as npm and pypi.
+
+## Implementation notes (Phase C, 2026-08-20)
+
+Phase C (the bun runner) landed against this spec.
+Both of section 9's empirical gates passed on bun 1.3.14,
+so the bun runner ships as a real runner
+rather than the explicit-error fallback
+the plan reserved for a failed gate.
+Full detail is recorded in `docs/research/SYNTHESIS.md` (entry 22);
+this note is the short version pinned to the spec that motivated it.
+
+1. **Placement gate: confirmed exactly as researched.**
+   `BUN_INSTALL_GLOBAL_DIR=<install_path>` and
+   `BUN_INSTALL_BIN=<install_path>/bin`,
+   together with the `bun add -g <package>@<version>` command form,
+   pin the entire global install (package tree, lockfile, bin symlinks)
+   under `install_path`.
+2. **Registry gate: bun reads the environment's own `~/.npmrc`
+   `registry=`.**
+   The dead-registry differential fails even against a warm bun cache,
+   because bun's manifest cache is keyed by registry host
+   and revalidated rather than trusted blindly.
+   Positive proof:
+   an uncached package appeared in the Nexus npm-proxy's cache
+   after a bun install pointed there via `.npmrc`.
+   `bunfig.toml` was not needed on this version,
+   so the per-runner registry table documents `.npmrc` for bun,
+   the same file npm reads.
+
+No deviations from the spec's section 4 sketch:
+the bun arm exactly mirrors
+the npm arm's trailer/existence-check/pinned-env discipline,
+with its own `BUNINSTALL_EXIT` success marker.
+The test image gained a bun layer:
+the official installer (`https://bun.sh/install`,
+mirror-overridable via the `BUN_INSTALL_URL` build arg),
+`BUN_INSTALL=/usr/local` so the binary lands at `/usr/local/bin/bun`,
+and `unzip` added to the image's apt list,
+since the installer unpacks a zip.

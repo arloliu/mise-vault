@@ -98,6 +98,7 @@ public package indexes once mirrors exist:
 | mise binary in test image | `--build-arg MISE_BINARY_URL=...` (hosted binary) or `MISE_INSTALL_URL=...` (mirrored install script) | `docker build test-image/` |
 | uv install script in test image | `--build-arg UV_INSTALL_URL=...` | `docker build test-image/` |
 | rustup install script in test image | `--build-arg RUSTUP_INSTALL_URL=...` | `docker build test-image/` |
+| bun install script in test image | `--build-arg BUN_INSTALL_URL=...` | `docker build test-image/` |
 | go-proxy remote | `GO_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
 | npm-proxy remote | `NPM_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |
 | pypi-proxy remote | `PYPI_PROXY_REMOTE=...` | environment for `provision-nexus.sh` |

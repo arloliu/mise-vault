@@ -81,7 +81,7 @@ Some catalog tools (`prettier` is the current npm example, `ruff` the
 current pypi example, `tokei` the current cargo example) are not
 prebuilt artifacts:
 `mise install` runs the ecosystem's own package manager
-(npm, pipx, uv, or cargo) against the registry YOUR machine already
+(npm, bun, pipx, uv, or cargo) against the registry YOUR machine already
 talks to.
 The plugin controls where the binary lands and pins the version;
 it does not control, and does not need to control, which registry the
@@ -98,6 +98,7 @@ install prebuilt packages and stay fast.
 | Runner | Reads its registry from |
 |---|---|
 | npm | `.npmrc` (`registry`, scoped or default) |
+| bun (opt-in npm runner) | `.npmrc` (`registry`) — the same file the npm runner reads; verified on bun 1.3.14. `.npmrc` support varies across older bun versions, and the plugin cannot observe which registry bun actually reached — use a verified bun version; the test suites' registry differential is what verifies this channel, and network egress policy is what keeps a public registry unreachable in production |
 | pipx (default pypi runner) | `pip.conf` (`index-url`, `trusted-host`) — pipx installs through pip, so it inherits pip's configuration with no separate setup |
 | uv (opt-in pypi runner) | Its own configuration only — user-level `~/.config/uv/uv.toml` (`index-url` or `[[index]]`) or `UV_DEFAULT_INDEX`/`UV_INSECURE_HOST`. A project-local `uv.toml` is ignored for `uv tool` commands. A plain-http index additionally needs `allow-insecure-host = ["<host>"]` (a list, host must match the index host) |
 | cargo (the only runner for a cargo tool) | `~/.cargo/config.toml` `[source.crates-io]` `replace-with`, pointing at a matching `[registries.<name>]` `index` — only a `sparse+http(s)://` index is supported; a git-index registry is rejected at approval time |
@@ -109,8 +110,8 @@ new configuration channel on top.
 ### Choosing a runner
 
 - `MISE_VAULT_NPM_RUNNER=npm|bun` (default `npm`).
-  The bun runner is not yet supported — set explicitly, it fails with a
-  message naming the limitation rather than silently falling back.
+  bun is the opt-in npm runner: it reads the same registry channel as
+  npm (`.npmrc`), and installs with `bun add -g <package>@<version>`.
 - `MISE_VAULT_PYPI_RUNNER=pipx|uv` (default `pipx`).
 - There is no `MISE_VAULT_CARGO_RUNNER`: cargo is the only tool that can
   build a crate from source, so it is always the runner for a cargo
@@ -130,6 +131,7 @@ the corresponding type, regardless of what else is in your environment:
 | Runner | Variables | Why |
 |---|---|---|
 | npm | `NPM_CONFIG_UPDATE_NOTIFIER=false`, `NPM_CONFIG_FUND=false`, `NPM_CONFIG_AUDIT=false` | noise suppression only — private registry proxies typically serve no audit endpoint |
+| bun | `BUN_INSTALL_GLOBAL_DIR`, `BUN_INSTALL_BIN` (both under the install path), `DO_NOT_TRACK=1` | placement, and telemetry off (noise suppression only) |
 | pipx | `PIPX_HOME`, `PIPX_BIN_DIR`, `PIPX_MAN_DIR`, `PIPX_COMPLETION_DIR` (all under the install path), `PIPX_DEFAULT_BACKEND=pip`, `PIPX_FETCH_PYTHON=never`, `PIP_DISABLE_PIP_VERSION_CHECK=1` | placement, keeping pipx on the documented `pip.conf` channel, and refusing to download a Python interpreter on its own |
 | uv | `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR` (under the install path), `UV_PYTHON_DOWNLOADS=never` | placement, and refusing to download a managed Python interpreter on its own |
 | cargo | `RUSTUP_AUTO_INSTALL=0` | its only pin — a rustup-provided cargo would otherwise download a missing toolchain by itself, which is your responsibility and may reach hosts outside your configured registry; placement needs no variable, since `cargo install --root <install_path>` already puts binaries under `<install_path>/bin` |
@@ -146,7 +148,7 @@ does not understand.
 
 The experiment suites have exercised: npm 11.12.1 and 9.2.0, pipx 1.4.3,
 uv 0.12.4 and 0.12.5, cargo 1.95.0 (host) and a rustup-installed stable
-toolchain 1.97.1 (test image).
+toolchain 1.97.1 (test image), and bun 1.3.14 (host and test image).
 There is no minimum-version gate in the plugin — toolchains are your
 own responsibility — but if an install succeeds with exit status 0 and
 then the plugin reports the expected binary missing, the most likely

@@ -1,7 +1,7 @@
 # Minimal developer-workstation image for offline/CI testing:
 # mise + git + curl + coreutils, plus the ecosystem-tool-type runners
-# (npm, pipx, uv, cargo) the offline gate needs for the npm/pypi/cargo tool
-# types.
+# (npm, pipx, uv, cargo, bun) the offline gate needs for the npm/pypi/cargo
+# tool types.
 # Toolchains are deliberately image-build-time installs, not vault-managed
 # (cargo/npm/uv/pipx are the user's own responsibility, not the plugin's) —
 # this mirrors a real workstation that already has them, the same way mise
@@ -14,6 +14,7 @@
 #   --build-arg MISE_INSTALL_URL=https://mirror.company.example/mise.run
 #   --build-arg UV_INSTALL_URL=https://mirror.company.example/uv-install.sh
 #   --build-arg RUSTUP_INSTALL_URL=https://mirror.company.example/rustup-init.sh
+#   --build-arg BUN_INSTALL_URL=https://mirror.company.example/bun-install.sh
 # Standard proxy build args (http_proxy/https_proxy/no_proxy) are honored by
 # apt and curl automatically when passed with --build-arg.
 ARG BASE_IMAGE=ubuntu:24.04
@@ -26,7 +27,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     fi \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      git curl ca-certificates xz-utils python3 python3-pip python3-venv pipx nodejs npm gcc libc6-dev \
+      git curl ca-certificates xz-utils python3 python3-pip python3-venv pipx nodejs npm gcc libc6-dev unzip \
  && rm -rf /var/lib/apt/lists/*
 
 # Prefer a directly hosted mise binary (fully private); fall back to the
@@ -48,6 +49,15 @@ RUN curl -fsSL "$UV_INSTALL_URL" | UV_INSTALL_DIR=/usr/local/bin sh \
  && uv --version \
  && npm --version \
  && pipx --version
+
+# bun: no Ubuntu 24.04 apt package; install via its official script (or a
+# mirror of it). The installer places the binary at $BUN_INSTALL/bin/bun,
+# so BUN_INSTALL=/usr/local lands it at /usr/local/bin/bun — on PATH under
+# any runtime $HOME, no shell-profile step required. It downloads a zip,
+# which is why unzip is in the apt list above.
+ARG BUN_INSTALL_URL="https://bun.sh/install"
+RUN curl -fsSL "$BUN_INSTALL_URL" | BUN_INSTALL=/usr/local bash \
+ && bun --version
 
 # cargo: Ubuntu 24.04's apt rustc/cargo (1.75.0) is too old to build tokei
 # 14.0.0 — verified empirically: `cargo install tokei --version 14.0.0

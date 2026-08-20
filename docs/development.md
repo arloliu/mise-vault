@@ -12,7 +12,7 @@ mise clones it, reads `metadata.lua`, and calls the three Lua hooks in `hooks/`.
 | Piece | Runs when |
 |---|---|
 | `hooks/backend_list_versions.lua` | `mise ls-remote <tool>` — returns versions from `catalog/<tool>/versions.json`, order verbatim |
-| `hooks/backend_install.lua` | `mise install <tool>@<version>` — artifact tools: Nexus URL, `curl -n` download, SHA-256, extract; go tools: `go install` against the plugin-set GOPROXY (see the go-installed tools section); npm/pypi/cargo tools: the selected runner (npm; pipx or uv; cargo, the only possible runner for a cargo tool) against the user's own ecosystem registry configuration (see the npm, pypi, and cargo tool types section) |
+| `hooks/backend_install.lua` | `mise install <tool>@<version>` — artifact tools: Nexus URL, `curl -n` download, SHA-256, extract; go tools: `go install` against the plugin-set GOPROXY (see the go-installed tools section); npm/pypi/cargo tools: the selected runner (npm or bun; pipx or uv; cargo, the only possible runner for a cargo tool) against the user's own ecosystem registry configuration (see the npm, pypi, and cargo tool types section) |
 | `hooks/backend_exec_env.lua` | tool activation — PATH entries and env vars (e.g. GOROOT) from `tool.json` |
 | `lib/common.lua` | shared helpers used by all three hooks |
 | `scripts/vault-sync` | generates the machine config (`~/.config/mise/conf.d/mise-vault.toml`) from the catalog |
@@ -27,9 +27,12 @@ or test infrastructure (`experiment/`, `tests/`).
 - Docker with the compose plugin (the experiment stack runs Nexus, GitLab CE, and a CI runner)
 - mise 2026.8.1 or newer (`mise --version`)
 - `git`, `curl`, `python3` (no Python packages needed locally; CI installs `jsonschema`)
-- For the npm, pypi, and cargo tool-type poc-test phases: `npm`, `pipx`,
-  `uv`, and a Rust toolchain (`cargo`, plus a C linker) on `PATH`
-  (bun is not needed — its runner is Phase C, not yet shipped)
+- For the npm, pypi, and cargo tool-type poc-test phases:
+  `npm`, `bun`, `pipx`, `uv`,
+  and a Rust toolchain (`cargo`, plus a C linker) on `PATH`.
+  If bun was installed by its official installer
+  to `~/.bun/bin` without a `PATH` entry,
+  poc-test finds it there by itself.
 
 ## Environment setup (once)
 
@@ -562,8 +565,8 @@ detail that lives in
 [README.md](../README.md#npm-pypi-and-cargo-tools) —
 read that section before touching this code, since the hooks assume
 exactly the pins documented there.
-Full field grammars and the rollout plan (the bun runner is the one
-remaining later phase) are authoritative in
+All rollout phases have shipped; full field grammars and install
+semantics remain authoritative in
 [`docs/specs/2026-08-20-ecosystem-tools-design.md`](specs/2026-08-20-ecosystem-tools-design.md).
 
 ## Nexus URL override channels

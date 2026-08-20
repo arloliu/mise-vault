@@ -537,3 +537,29 @@ poc-test: 78/78.
 | D35 | **Nexus CE (verified: 3.95.1) supports the cargo proxy repository format, confirming the spec's open question in section 8.** A `cargo/proxy` repository proxying `https://index.crates.io` serves the standard sparse index layout (JSON lines, keyed by crate-name length, e.g. `to/ke/tokei`) directly under the repository root, and the repository's own `config.json` `dl` field routes matching crate tarball downloads through the same proxy — so one `cargo install --locked` against it pulls a crate's entire dependency closure, exactly like the existing go/npm/pypi proxies. `experiment/scripts/provision-nexus.sh` provisions `cargo-proxy` the same way it provisions the npm/pypi proxies (including its own scoped anonymous-read role, since cargo's registry auth model is unrelated to netrc and the experiment's `~/.cargo/config.toml` carries no embedded credentials, mirroring the production shape); `seed-artifacts.sh` warms its cache with a real `cargo install --locked` for tokei's full ~130-crate closure; and `offline-test` includes the cargo case unconditionally, not as a research-time-deferred maybe. |
 
 ---
+
+## 22. Ecosystem tool types, Phase C — the bun runner (2026-08-20)
+
+No new tool type this time: the npm tool type gained bun as an
+opt-in second runner, selected with
+`MISE_VAULT_NPM_RUNNER=bun` (default stays `npm`), installing with
+`bun add -g <package>@<version>` against the user's own npm registry
+configuration.
+No new catalog surface — bun installs the same npm tool records Phase
+A introduced.
+The design is fully recorded in
+`docs/specs/2026-08-20-ecosystem-tools-design.md`
+(the same spec that covered Phases A and B); that spec file remains
+the authoritative detail for field grammars, install semantics, and
+the per-runner environment table — this entry records what shipped
+and what changed during implementation, not a restatement of the
+design.
+poc-test: 87/87.
+
+| # | Decision |
+|---|---|
+| D36 | **The two research-claim gates passed unchanged on bun 1.3.14.** `bun add -g` with `BUN_INSTALL_GLOBAL_DIR`/`BUN_INSTALL_BIN` pins the global install under `install_path` (package tree, lockfile, bin symlinks; only bun's package cache stays in the user home, the same nature as npm's own cache), so the bun runner ships as a real runner rather than the explicit-error fallback the plan reserved for a failed gate. |
+| D37 | **bun reads the environment's `~/.npmrc` registry on this version; the broken-registry differential is sound against a warm cache because bun keys its manifest cache by registry host and revalidates**, and the positive leg was proven by an uncached package appearing in the Nexus npm-proxy cache after a bun install. `bunfig.toml` was not needed; if a future bun version stops honoring `.npmrc`, the suites' differential is what will catch it, and `bunfig.toml` becomes the documented channel then. |
+| D38 | **The test image installs bun via its official installer pinned to `/usr/local` (mirror-overridable `BUN_INSTALL_URL` build arg, same convention as uv/rustup), with `unzip` added explicitly because the installer unpacks a zip and the image uses `--no-install-recommends`.** bun 1.3.14 verified identical on host and image. |
+
+---

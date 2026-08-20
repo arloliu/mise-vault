@@ -145,7 +145,7 @@ if goc_ok:
 else:
     s.bad(f"gocensus install ({install_r.tail()})")
 
-s.phase("2b. npm and pypi tool types (both pypi runners) with zero public internet")
+s.phase("2b. npm and pypi tool types (both npm runners, both pypi runners) with zero public internet")
 
 # There is deliberately no MISE_VAULT_*_REGISTRY channel for these types
 # (design doc section 5): the plugin never touches registry configuration,
@@ -189,6 +189,29 @@ if prettier_ok:
     s.ok("prettier installed via npm and runs (package document + tarball from private npm-proxy)")
 else:
     s.bad(f"prettier install ({install_r.tail()})")
+
+# same package through the same private npm-proxy, via the opt-in bun
+# runner — bun speaks the npm registry protocol, so the already-cached
+# package document and tarball serve it with zero public internet.
+# Success alone cannot prove WHICH runner ran (a regression that silently
+# selected npm would also succeed through the same proxy), so this also
+# demands bun's own footprint: the "via bun" install log line and bun's
+# lockfile inside the install path (npm writes no bun.lock there).
+install_r = run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"],
+                env={**ENV, "MISE_VAULT_NPM_RUNNER": "bun"})
+prettier_bun_path = HOME / ".local/share/mise/installs/prettier" / PRETTIER_V
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"prettier@{PRETTIER_V}", "--", "prettier", "--version"], env=ENV)
+    prettier_bun_ok = (bool(PRETTIER_V) and exec_r.ok and PRETTIER_V in exec_r.out
+                       and "via bun" in (install_r.out + install_r.err)
+                       and (prettier_bun_path / "bun.lock").is_file())
+else:
+    prettier_bun_ok = False
+if prettier_bun_ok:
+    s.ok("prettier installed via bun (opt-in runner, bun.lock + install-log proof) and runs "
+         "(package document + tarball from private npm-proxy)")
+else:
+    s.bad(f"prettier bun install ({install_r.tail()})")
 
 install_r = run(["mise", "install", f"ruff@{RUFF_V}"], env=ENV)
 if install_r.ok:
