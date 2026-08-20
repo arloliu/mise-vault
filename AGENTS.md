@@ -268,6 +268,14 @@ The operative rules:
   must be named explicitly, since `gcc` only recommends it rather than
   depending on it, and without it linking fails with a missing
   `crt1.o`/`crti.o` and C runtime libraries.
+- **`docker network connect` attaches a container with an empty alias
+  list — compose's service aliases are NOT restored.**
+  Observed via the offline gate: it disconnects Nexus from the egress
+  network and reconnects it afterwards, and the plain reconnect dropped
+  the `nexus` alias, so CI job containers could no longer resolve
+  `http://nexus:8081` and every pipeline failed with curl exit 6.
+  Any script that reconnects a compose service must pass the service
+  alias explicitly (`docker network connect --alias nexus ...`).
 - **An `npm install` through a proxy does not prove the proxy holds the
   tarballs when the local npm cache is warm.**
   Observed against the experiment stack:

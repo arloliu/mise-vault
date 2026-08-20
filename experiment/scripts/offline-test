@@ -23,8 +23,18 @@ IMAGE = "mise-vault-test"
 
 def nexus_egress(connect):
     verb = "connect" if connect else "disconnect"
-    r = subprocess.run(["docker", "network", verb, EGRESS_NETWORK, NEXUS_CONTAINER],
-                       capture_output=True, text=True)
+    cmd = ["docker", "network", verb]
+    if connect:
+        # A plain reconnect attaches the container with an EMPTY alias
+        # list, silently dropping the "nexus" service alias compose
+        # assigned — after which CI job containers on this network can no
+        # longer resolve the http://nexus:8081 URLs their project
+        # variables carry, and every pipeline fails with curl exit 6
+        # until the stack is recreated (observed exactly that way).
+        # Passing the aliases explicitly restores what compose set up.
+        cmd += ["--alias", "nexus", "--alias", NEXUS_CONTAINER]
+    cmd += [EGRESS_NETWORK, NEXUS_CONTAINER]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     # already connected / already disconnected is fine (a previous run may
     # have been interrupted); anything else is a real error
     if r.returncode != 0 and "is not connected" not in r.stderr \
