@@ -117,6 +117,21 @@ git push experiment main            # and tags, if the change should be pinnable
 git tag v0.0.X && git push experiment v0.0.X
 ```
 
+Pushing `main` starts the experiment GitLab's CI pipeline,
+and a release is not finished until that pipeline is green
+for the pushed commit.
+The pipeline covers ground the local suites cannot —
+the probe tests inside the CI job images,
+and the registry endpoints as the runner network sees them —
+and a red pipeline is invisible to the local suites,
+which is exactly how one once stayed red for days unnoticed.
+Check it in the web UI, or:
+
+```bash
+curl -s -H "PRIVATE-TOKEN: <token>" \
+  "http://127.0.0.3:8929/api/v4/projects/devtools%2Fmise-vault/pipelines?per_page=1&sha=$(git rev-parse HEAD)"
+```
+
 | Suite | Covers | Runtime |
 |---|---|---|
 | `experiment/scripts/poc-test` | plugin behavior matrix: discovery, installs (archive/runtime/binary/go/npm/pypi/cargo), aliases, `.tool-versions`, fail-closed paths, redirect refusal, catalog update, unsupported platform, runner-selection and runner-missing cases | ~2 min plus the cargo compile budget (see below) |
