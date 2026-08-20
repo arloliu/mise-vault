@@ -2,7 +2,7 @@
 --- from private Nexus, with the approval catalog bundled in this repo.
 PLUGIN = {
     name = "vault",
-    version = "0.6.0",
+    version = "0.7.0",
     description = "Company-approved developer tools from private Nexus",
     author = "devtools",
 }
