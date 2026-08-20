@@ -162,8 +162,12 @@ or version.
   Widening to a list later is a backward-compatible schema change,
   so nothing is reserved for it now.
 
-`versions.json`: the same ordered array, entries carry a bare `version`
-only — **no checksum field for these types** (see section 6).
+`versions.json`: the same ordered array.
+npm and cargo entries carry a bare `version` only —
+**no checksum field for those two types** (see section 6);
+a pypi entry may additionally carry `hashes`,
+the always-enforced artifact digests
+the deferred-items implementation notes describe.
 Version grammars per ecosystem, all shell-safe,
 starting from the go version grammar and widening only where the
 ecosystem requires it (e.g. PEP 440 local segments use `+`;
@@ -380,7 +384,9 @@ display only, never validated and never overridden.
 
 ## 6. Integrity stance
 
-Version-pin only.
+Version-pin only at first; pypi later gained optional recorded hashes
+(see the deferred-items implementation notes at the end of this
+document).
 None of these ecosystems supports an ad-hoc per-install content hash the
 way go's `h1` does
 (cargo/npm/bun verify only against the registry that serves the content;
@@ -389,12 +395,16 @@ uv's `--require-hashes` does not exist on `uv tool install`) —
 verified empirically in the research document.
 The approved-version list in `versions.json` remains the security
 boundary, as it already is for a go record without `h1`.
-AGENTS.md's fail-closed bullet must be extended the same way it was for
-the go exception: artifact SHA-256 stays mandatory,
-ecosystem tool types are named as version-pin-only.
-If pip-style hash pinning is ever wanted, a temp-requirements-file
-mechanism for the pipx runner is the known path — explicitly out of
-scope now.
+For npm and cargo that is the whole story.
+For pypi, the temp-requirements-file mechanism this section originally
+reserved as the known path has since shipped:
+a version record may carry the `sha256:` digests of its release files,
+recorded by default at approval (`--no-hashes` is the explicit
+version-pin-only opt-out, mirroring go's `--no-h1`),
+and a recorded list is always enforced —
+pipx installs go through pip's hash-checking download first,
+and the uv runner refuses a hashed record outright,
+since it has no mode that could enforce one.
 
 Version pinning also does not reach the dependency tree,
 and the three ecosystems differ sharply (resolved 2026-08-20):
@@ -456,9 +466,11 @@ seeding time and test time.
   and auth rides the user's environment (netrc via `curl -n`),
   never the URL.
 - `scripts/verify-artifacts`: same existence probes for every approved
-  version; `--checksum` has nothing to verify for these types and must
-  say so per record (skip, with the count reported), like h1-less go
-  records.
+  version; `--checksum` originally had nothing to verify for these
+  types and said so per record (skip, with the count reported), like
+  h1-less go records — since the pypi hash amendment it compares a
+  hashed pypi record's full digest set against the simple index, and
+  only hash-less records keep the skip.
 - `scripts/validate-catalog` + schemas: new branches, cross-file rules
   (type ⇔ version-record shape), negative fixtures per grammar trap
   (shell metacharacters, uppercase, trailing newline, scoped-name edge
@@ -685,3 +697,41 @@ mirror-overridable via the `BUN_INSTALL_URL` build arg),
 `BUN_INSTALL=/usr/local` so the binary lands at `/usr/local/bin/bun`,
 and `unzip` added to the image's apt list,
 since the installer unpacks a zip.
+
+## Implementation notes (deferred items, 2026-08-20)
+
+Two deferred items landed against this spec after Phase C;
+full detail in `docs/research/SYNTHESIS.md` (entry 24).
+
+1. **The npm/cargo version envelope accepts uppercase prerelease and
+   build identifiers** (section 3's reserved "small reviewed change",
+   made: schema, validator, runtime grammar, and fixtures moved
+   together).
+   The core triple stays digits-only, every character stays shell-safe,
+   and the pypi and go grammars are unchanged.
+   Two invalid fixtures moved to cross-check-only coverage:
+   their values now legally satisfy the widened bare-version shape of
+   the OTHER ecosystems in the schema's anyOf,
+   so only the validator's per-type dispatch rejects them.
+2. **pypi records gained optional, always-enforced artifact hashes**
+   (section 6's reserved temp-requirements-file mechanism, made).
+   Approval collects the sha256 of every release file of the version.
+   The digests come from the same simple-index document
+   the existence probe already fetches
+   (PEP 691 JSON `hashes`, or the HTML `#sha256=` fragments).
+   Partial coverage is refused,
+   at approval and again by `verify-artifacts --checksum`;
+   `--no-hashes` is the explicit version-pin-only opt-out.
+   Enforcement is two-stage
+   because pip rejects a command-line requirement
+   in `--require-hashes` mode,
+   even one that also appears hashed in the requirements file
+   (verified empirically):
+   `pip download --require-hashes` verifies the artifact first;
+   pipx then installs the verified local file
+   under the same placement pins as the unhashed path.
+   The uv runner refuses a hashed record outright.
+   The real catalog's ruff record deliberately stays version-pin-only,
+   keeping the uv runner's end-to-end coverage alive;
+   the hash-enforced positive and tampered-hash negative run in the
+   behavior suite through fixture tools carrying the same real package.

@@ -1,0 +1,6 @@
+{
+  "name": "ruff-bad-hash",
+  "type": "pypi",
+  "package": "ruff",
+  "bin": "ruff"
+}

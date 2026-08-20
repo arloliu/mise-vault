@@ -63,6 +63,9 @@ end
 ---   [ { "version": "2.12.1", "platforms": { "linux-amd64": { "sha256": "..." } } }, ... ]
 --- Go tools (h1 optional — see hooks/backend_install.lua):
 ---   [ { "version": "0.2.0", "h1": "h1:..." }, ... ]
+--- PyPI tools (hashes optional, but always enforced when present — see
+--- hooks/backend_install.lua):
+---   [ { "version": "1.2.3", "hashes": ["sha256:<64 hex chars>", ...] }, ... ]
 function M.load_versions(tool)
     check_tool_name(tool)
     local path = file.join_path(M.plugin_dir(), "catalog", tool, "versions.json")
@@ -337,6 +340,32 @@ function M.check_pep440_envelope(version, label)
         fail()
     end
     return version
+end
+
+--- Validate the optional pypi "hashes" list before it reaches a shell
+--- command: a non-empty array where every entry is pip's own --hash
+--- syntax, "sha256:" followed by exactly 64 lowercase hex characters (the
+--- digest of one release file of this version). Recorded hashes are
+--- always enforced at install time — see hooks/backend_install.lua — so
+--- this check runs whenever the field is present at all, with no way to
+--- opt out.
+--- Lowercase-only is a real constraint here (unlike an artifact sha256,
+--- hex case matters to this comparison because the value is written
+--- verbatim into a requirements file pip parses literally), so the
+--- length check backs up the pattern rather than relying on %x, which
+--- also matches uppercase.
+function M.check_pip_hashes(hashes, label)
+    if type(hashes) ~= "table" or #hashes == 0 then
+        error(label .. " is not a valid pip hash list (expected a non-empty array): " ..
+              tostring(hashes))
+    end
+    for _, h in ipairs(hashes) do
+        if type(h) ~= "string" or #h ~= 71 or h:match("^sha256:[0-9a-f]+$") == nil then
+            error(label .. " has an invalid pip hash (expected sha256: followed by 64 " ..
+                  "lowercase hex characters): " .. tostring(h))
+        end
+    end
+    return hashes
 end
 
 --- Substitute {version} / {install_path} placeholders.

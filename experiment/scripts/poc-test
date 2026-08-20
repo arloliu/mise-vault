@@ -98,6 +98,8 @@ ALIASES = {
     "smoke": "vault:smoke",
     "gocensus": "vault:gocensus",
     "gocensus-bad-h1": "vault:gocensus-bad-h1",
+    "ruff-hashed": "vault:ruff-hashed",
+    "ruff-bad-hash": "vault:ruff-bad-hash",
     "golangci-lint": f"vault:golangci-lint[nexus_url={NEXUS_HOST_URL}/repository/devtools]",
     "prettier": "vault:prettier",
     "ruff": "vault:ruff",
@@ -229,8 +231,10 @@ def link_working_tree():
     for d in ("hooks", "lib", "config", "catalog"):
         shutil.copytree(REPO_ROOT / d, plug / d)
     # fixtures: darwin-only (unsupported platform), smoke (deliberately wrong
-    # sha256), gocensus-bad-h1 (real go module, deliberately wrong h1)
-    for tool in ("darwin-only", "smoke", "gocensus-bad-h1"):
+    # sha256), gocensus-bad-h1 (real go module, deliberately wrong h1),
+    # ruff-hashed (real pypi package with its real recorded pip hashes),
+    # ruff-bad-hash (same package, deliberately wrong hashes)
+    for tool in ("darwin-only", "smoke", "gocensus-bad-h1", "ruff-hashed", "ruff-bad-hash"):
         shutil.copytree(REPO_ROOT / "tests/fixtures/catalog" / tool, plug / "catalog" / tool)
     run(["mise", "plugins", "uninstall", "vault"], env=home.env)
     return plug, run(["mise", "plugins", "link", "vault", str(plug)], env=home.env)
@@ -714,6 +718,40 @@ s.check("forged UVINSTALL_EXIT=0 in uv output cannot fake a successful install",
 # later phase that might exec them
 run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=home.env)
 run(["mise", "install", "-f", f"ruff@{RUFF_V}"], env=home.env)
+
+# hash-enforced pypi records: ruff-hashed carries the real sha256 digests of
+# every release file of its version, ruff-bad-hash carries well-formed but
+# wrong ones. Recorded hashes are always enforced: pip downloads and
+# verifies the artifact first, then pipx installs the verified local file.
+RUFF_HASHED_V = "0.16.3"
+install_r = s.check_cmd(
+    f"install ruff-hashed@{RUFF_HASHED_V} (pipx runner, pip --require-hashes download)",
+    ["mise", "install", "-f", f"ruff-hashed@{RUFF_HASHED_V}"], env=home.env)
+r = run(["mise", "exec", f"ruff-hashed@{RUFF_HASHED_V}", "--", "ruff", "--version"], env=home.env)
+s.check(f"ruff-hashed runs and reports {RUFF_HASHED_V}", RUFF_HASHED_V in r.out, detail=r.tail())
+diag_text = install_r.out + install_r.err
+s.check("hash-enforced install log names the digest count",
+        "hash-enforced: 18 recorded sha256 digests" in diag_text, detail=install_r.tail())
+
+r = run(["mise", "install", "-f", "--verbose", f"ruff-hashed@{RUFF_HASHED_V}"], env=home.env)
+verbose_out = r.out + r.err
+s.check("hash-enforced install downloads via pip --require-hashes",
+        r.ok and "--require-hashes" in verbose_out, detail=r.tail())
+
+# wrong recorded hashes must fail the download, never install anything
+r = run(["mise", "install", "-f", f"ruff-bad-hash@{RUFF_HASHED_V}"], env=home.env)
+combined = r.out + r.err
+s.check("tampered pip hashes abort the install during the verified download",
+        (not r.ok) and "pip download failed" in combined, detail=r.tail())
+
+# recorded hashes can never be skipped by switching runner: uv has no
+# hash-checking mode, so it must refuse the record outright
+env_uv_hashed = {**home.env, "MISE_VAULT_PYPI_RUNNER": "uv"}
+r = run(["mise", "install", "-f", f"ruff-hashed@{RUFF_HASHED_V}"], env=env_uv_hashed)
+combined = r.out + r.err
+s.check("uv runner refuses a hash-enforced record, naming pipx as the fix",
+        (not r.ok) and "has recorded pip hashes" in combined
+        and "use the pipx runner" in combined, detail=r.tail())
 
 s.phase(f"Phase 4e: cargo-installed tool (tokei, via cargo through {CARGO_PROXY_HOST_URL})")
 # cargo compiles tokei from source (~10s-2min depending on cache warmth and

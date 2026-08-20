@@ -171,6 +171,35 @@ def write_tool(catalog_dir, name, tool_json):
     (tool_dir / "versions.json").write_text("[]\n")
 
 
+def write_pypi_verify_catalog(tmp_root, name, package, version, hashes=None):
+    """A fresh throwaway catalog copy holding one pypi tool whose
+    versions.json already carries a single approved record -- used to
+    drive scripts/verify-artifacts directly. Unlike add-version (which
+    only ever appends a new record), verify-artifacts reads records that
+    are already in the catalog, so the record has to be written up front
+    rather than produced by running the tool under test."""
+    import json
+
+    catalog_dir = fresh_catalog(tmp_root)
+    tool_dir = Path(catalog_dir) / name
+    tool_dir.mkdir()
+    (tool_dir / "tool.json").write_text(json.dumps(
+        {"name": name, "type": "pypi", "package": package}, indent=2) + "\n")
+    record = {"version": version}
+    if hashes is not None:
+        record["hashes"] = hashes
+    (tool_dir / "versions.json").write_text(json.dumps([record], indent=2) + "\n")
+    return catalog_dir
+
+
+def run_verify_artifacts_checksum(catalog_dir, tool, extra_argv=()):
+    """Run scripts/verify-artifacts --checksum restricted to one tool, the
+    same way scripts/approve invokes it after validation -- against a
+    throwaway catalog copy, never the real catalog/."""
+    return run([VERIFY_ARTIFACTS, "--checksum", "--tool", tool,
+                "--catalog-dir", str(catalog_dir), *extra_argv])
+
+
 def assert_add_version_accepted(desc, tool, version, tmp_root, extra_argv=(), setup=None):
     """Run scripts/add-version directly (not through approve), in --dry-run
     mode, against a fresh catalog copy and assert it was accepted: exit 0,
@@ -569,7 +598,10 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
     # catalog carries no hyphenated pypi package) with package "sample-pkg"
     # and target version "1.2.3", proving the PEP 625 sdist form, the
     # wheel form, and the legacy sdist form are all accepted, across both
-    # the PEP 691 JSON-files fallback and the PEP 503 HTML fallback. ---
+    # the PEP 691 JSON-files fallback and the PEP 503 HTML fallback. None
+    # of these fixtures carries a sha256 for its file, so every case below
+    # passes --no-hashes deliberately -- these cases exist to prove the
+    # filename match, not the hash collection (covered separately below). ---
     def setup_hyphenated_pypi(catalog_dir):
         write_tool(catalog_dir, "pypi-hyphenated-sample",
                    {"name": "pypi-hyphenated-sample", "type": "pypi", "package": "sample-pkg"})
@@ -580,7 +612,7 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
         assert_add_version_accepted(
             "pypi probe: hyphenated package, PEP 625 sdist form (PEP 691 JSON files-list)",
             "pypi-hyphenated-sample", "1.2.3", tmp,
-            extra_argv=["--pypi-index-url", index],
+            extra_argv=["--pypi-index-url", index, "--no-hashes"],
             setup=setup_hyphenated_pypi)
 
     with fixed_response_server(
@@ -593,7 +625,7 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
         assert_add_version_accepted(
             "pypi probe: hyphenated package, wheel form (PEP 503 HTML fallback)",
             "pypi-hyphenated-sample", "1.2.3", tmp,
-            extra_argv=["--pypi-index-url", index],
+            extra_argv=["--pypi-index-url", index, "--no-hashes"],
             setup=setup_hyphenated_pypi)
 
     with fixed_response_server(
@@ -602,7 +634,7 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
         assert_add_version_accepted(
             "pypi probe: hyphenated package, legacy sdist form (PEP 691 JSON files-list)",
             "pypi-hyphenated-sample", "1.2.3", tmp,
-            extra_argv=["--pypi-index-url", index],
+            extra_argv=["--pypi-index-url", index, "--no-hashes"],
             setup=setup_hyphenated_pypi)
 
     # The legacy sdist form is the one a token-split-on-every-hyphen bug
@@ -621,7 +653,7 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
         assert_add_version_accepted(
             "pypi probe: hyphenated package, legacy sdist form (PEP 503 HTML fallback)",
             "pypi-hyphenated-sample", "1.2.3", tmp,
-            extra_argv=["--pypi-index-url", index],
+            extra_argv=["--pypi-index-url", index, "--no-hashes"],
             setup=setup_hyphenated_pypi)
 
     log = str(Path(tmp) / "npm-redirect.log")
@@ -637,6 +669,164 @@ with tempfile.TemporaryDirectory(prefix="approve-tests.") as tmp:
             "pypi probe: redirect refused", "ruff", "1.0.0", tmp,
             "redirects are refused",
             extra_argv=["--pypi-index-url", "http://127.0.0.1:18465"])
+
+    # --- add-version: pypi artifact hashes (pip-style, mirroring the go h1
+    # convention exactly -- collected by default, --no-hashes opts out
+    # explicitly). Every case below reuses "ruff" and version "1.2.3", which
+    # is not an approved version in the real catalog (only 0.16.3 is), so it
+    # is free to use here. Each case uses a distinct fill character for its
+    # sha256 fixture so the dry-run preview assertions can never pass for
+    # the wrong reason. ---
+    sha_a = "a" * 64
+    sha_b = "b" * 64
+    sha_c = "c" * 64
+
+    with fixed_response_server(
+            18480,
+            '{"files": [{"filename": "ruff-1.2.3.tar.gz", '
+            '"hashes": {"sha256": "' + sha_a + '"}}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        r = assert_add_version_accepted(
+            "pypi hashes: PEP 691 JSON files[].hashes.sha256 collected",
+            "ruff", "1.2.3", tmp,
+            extra_argv=["--pypi-index-url", index])
+        s.check("pypi hashes: JSON case, sha256 recorded in the would-be record",
+                f'"sha256:{sha_a}"' in r.out, detail=r.tail())
+
+    with fixed_response_server(
+            18481,
+            '<!DOCTYPE html><html><body>'
+            '<a href="../../packages/ruff-1.2.3.tar.gz#sha256=' + sha_b + '">'
+            'ruff-1.2.3.tar.gz</a>'
+            '</body></html>',
+            content_type="text/html") as index:
+        r = assert_add_version_accepted(
+            "pypi hashes: HTML #sha256= URL fragment collected",
+            "ruff", "1.2.3", tmp,
+            extra_argv=["--pypi-index-url", index])
+        s.check("pypi hashes: HTML case, sha256 recorded in the would-be record",
+                f'"sha256:{sha_b}"' in r.out, detail=r.tail())
+
+    with fixed_response_server(
+            18482, '{"files": [{"filename": "ruff-1.2.3.tar.gz"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        assert_add_version_rejected(
+            "pypi hashes: index exposes no sha256 for the version's only file",
+            "ruff", "1.2.3", tmp,
+            "--no-hashes",
+            extra_argv=["--pypi-index-url", index])
+
+    with fixed_response_server(
+            18483, '{"files": [{"filename": "ruff-1.2.3.tar.gz"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        r = assert_add_version_accepted(
+            "pypi hashes: --no-hashes opts out of the no-sha256 rejection above",
+            "ruff", "1.2.3", tmp,
+            extra_argv=["--pypi-index-url", index, "--no-hashes"])
+        s.check("pypi hashes: --no-hashes record has no \"hashes\" field",
+                '"hashes"' not in r.out, detail=r.tail())
+
+    with fixed_response_server(
+            18484,
+            '{"files": ['
+            '{"filename": "ruff-1.2.3.tar.gz", "hashes": {"sha256": "' + sha_c + '"}}, '
+            '{"filename": "ruff-1.2.3-py3-none-any.whl"}'
+            ']}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        assert_add_version_rejected(
+            "pypi hashes: one matching file has a sha256 and another lacks one "
+            "-- partial coverage refused",
+            "ruff", "1.2.3", tmp,
+            "--no-hashes",
+            extra_argv=["--pypi-index-url", index])
+
+    # --- verify-artifacts: pypi hash verification under --checksum. approve
+    # runs "verify-artifacts --checksum" after validation, so a well-formed
+    # but wrong or drifted recorded hash must be caught here, before the
+    # runtime would ever fail closed on it at install time. Each case below
+    # writes its own throwaway catalog copy with a single already-approved
+    # pypi record (verify-artifacts reads existing records; it never
+    # appends), then drives verify-artifacts directly against a mock index. ---
+    sha_verify_match = "5" * 64
+    sha_verify_wrong = "6" * 64
+
+    with fixed_response_server(
+            18490,
+            '{"files": [{"filename": "vhmpkg-1.2.3.tar.gz", '
+            '"hashes": {"sha256": "' + sha_verify_match + '"}}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        catalog_dir = write_pypi_verify_catalog(
+            tmp, "verify-pypi-hash-match", "vhmpkg", "1.2.3",
+            hashes=[f"sha256:{sha_verify_match}"])
+        r = run_verify_artifacts_checksum(catalog_dir, "verify-pypi-hash-match",
+                                           extra_argv=["--pypi-index-url", index])
+        s.check("verify-artifacts pypi hashes: matching recorded hash passes (exit 0)",
+                r.ok, detail=r.tail())
+        s.check("verify-artifacts pypi hashes: ok line mentions the digest match",
+                "recorded pypi artifact digests match the index" in r.out,
+                detail=r.tail())
+
+    with fixed_response_server(
+            18491,
+            '{"files": [{"filename": "vhmpkg-1.2.3.tar.gz", '
+            '"hashes": {"sha256": "' + sha_verify_match + '"}}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        catalog_dir = write_pypi_verify_catalog(
+            tmp, "verify-pypi-hash-altered", "vhmpkg", "1.2.3",
+            hashes=[f"sha256:{sha_verify_wrong}"])
+        r = run_verify_artifacts_checksum(catalog_dir, "verify-pypi-hash-altered",
+                                           extra_argv=["--pypi-index-url", index])
+        s.check("verify-artifacts pypi hashes: altered recorded hash fails (exit != 0)",
+                not r.ok, detail=r.tail())
+        s.check("verify-artifacts pypi hashes: FAIL line names the mismatch",
+                "FAIL pypi sha256 mismatch" in r.out, detail=r.tail())
+
+    with fixed_response_server(
+            18492, '{"files": [{"filename": "vhmpkg-1.2.3.tar.gz"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        catalog_dir = write_pypi_verify_catalog(
+            tmp, "verify-pypi-hash-unverifiable", "vhmpkg", "1.2.3",
+            hashes=[f"sha256:{sha_verify_match}"])
+        r = run_verify_artifacts_checksum(catalog_dir, "verify-pypi-hash-unverifiable",
+                                           extra_argv=["--pypi-index-url", index])
+        s.check("verify-artifacts pypi hashes: index with no digests is unverifiable "
+                "(exit != 0)", not r.ok, detail=r.tail())
+        s.check("verify-artifacts pypi hashes: FAIL line names it unverifiable",
+                "unverifiable" in r.out, detail=r.tail())
+
+    # partial digest exposure: one matching file carries the recorded digest
+    # and another matching file carries none — the surviving digests compare
+    # equal, but an install that selects the uncovered file would fail pip's
+    # hash check, so the verifier must refuse rather than report a match
+    with fixed_response_server(
+            18494,
+            '{"files": [{"filename": "vhmpkg-1.2.3.tar.gz", '
+            '"hashes": {"sha256": "' + sha_verify_match + '"}}, '
+            '{"filename": "vhmpkg-1.2.3-py3-none-any.whl"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        catalog_dir = write_pypi_verify_catalog(
+            tmp, "verify-pypi-hash-partial", "vhmpkg", "1.2.3",
+            hashes=[f"sha256:{sha_verify_match}"])
+        r = run_verify_artifacts_checksum(catalog_dir, "verify-pypi-hash-partial",
+                                           extra_argv=["--pypi-index-url", index])
+        s.check("verify-artifacts pypi hashes: a digest-less index file fails the check "
+                "even when every exposed digest matches (exit != 0)",
+                not r.ok, detail=r.tail())
+        s.check("verify-artifacts pypi hashes: partial coverage reported as unverifiable",
+                "cannot be proven complete" in r.out, detail=r.tail())
+
+    with fixed_response_server(
+            18493, '{"files": [{"filename": "vhmpkg-1.2.3.tar.gz"}]}',
+            content_type="application/vnd.pypi.simple.v1+json") as index:
+        catalog_dir = write_pypi_verify_catalog(
+            tmp, "verify-pypi-hash-less", "vhmpkg", "1.2.3", hashes=None)
+        r = run_verify_artifacts_checksum(catalog_dir, "verify-pypi-hash-less",
+                                           extra_argv=["--pypi-index-url", index])
+        s.check("verify-artifacts pypi hashes: hash-less record still passes (exit 0)",
+                r.ok, detail=r.tail())
+        s.check("verify-artifacts pypi hashes: hash-less record shows the reworded "
+                "skip line",
+                "no hashes recorded for this pypi version" in r.out, detail=r.tail())
 
     # --- approve preflight: a cargo tool goes through the same generic
     # checks as any other tool (an already-approved version is a preflight

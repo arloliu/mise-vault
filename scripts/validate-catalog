@@ -69,6 +69,9 @@ MODULE_RE = re.compile(
 # literally, and an uppercase version would need go-proxy escaping there.
 GO_VERSION_RE = re.compile(r"^[0-9][a-z0-9.+_-]*\Z")
 H1_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=\Z")
+# A pip artifact digest, as pip's hash-checking mode expects it:
+# "sha256:" followed by exactly 64 lowercase hex characters.
+PIP_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 # npm package name: an optional "@scope/" prefix, then lowercase
 # [a-z0-9._-] segments. The "/" is the only path separator allowed
 # anywhere in the value, and only as the single scope separator; npm's
@@ -312,13 +315,27 @@ def builtin_validate_npm_version_rec(rec, where, path):
 
 
 def builtin_validate_pypi_version_rec(rec, where, path):
-    unknown = set(rec) - {"version"}
+    unknown = set(rec) - {"version", "hashes"}
     if unknown:
         err(path, f"{where}: unknown fields: {sorted(unknown)}")
     v = rec.get("version")
     if not isinstance(v, str) or not PEP440_ENVELOPE_RE.match(v):
         err(path, f"{where}: invalid PyPI tool version: {v!r} "
                   f"(expected a PEP 440 envelope)")
+    if "hashes" in rec:
+        hashes = rec.get("hashes")
+        if not isinstance(hashes, list) or not hashes:
+            err(path, f"{where}: hashes must be a non-empty list of pip artifact digests")
+        else:
+            seen = set()
+            for h in hashes:
+                if not isinstance(h, str) or not PIP_HASH_RE.match(h):
+                    err(path, f"{where}: invalid hash: {h!r} "
+                              f"(expected sha256:<64 lowercase hex chars>)")
+                elif h in seen:
+                    err(path, f"{where}: duplicate hash: {h!r}")
+                else:
+                    seen.add(h)
 
 
 def builtin_validate_cargo_version_rec(rec, where, path):

@@ -68,10 +68,11 @@ this document states the resulting rules in plain language.
     after bootstrap" principle: it applies only to these two types,
     and it leaves the rule exactly as absolute as before for artifact
     and go-installed tools.
-    They are version-pin-only — no checksum field exists for either
-    type, so the approved-version list is their entire security
-    boundary, the same role it already plays for an `h1`-less go
-    record.
+    They started version-pin-only — no checksum field for either
+    type, the approved-version list as their entire security boundary,
+    the same role it already plays for an `h1`-less go record.
+    (pypi records later gained optional, always-enforced artifact
+    hashes — see item 13 below; npm remains version-pin-only.)
     Routing is unchanged (`vault:<tool>`, package name in `tool.json`).
     cargo (Phase B, item 11 below) followed the same pattern; the bun
     runner (Phase C, item 12 below) landed the same way, as npm's
@@ -83,10 +84,12 @@ this document states the resulting rules in plain language.
     manager, reading whatever registry `~/.cargo/config.toml` source-replacement
     points at — the same "user's own environment" network model
     Phase A established, extended to a third channel.
-    It is version-pin-only like npm and pypi (no checksum field; the
-    approved-version list is the entire security boundary), so this is
-    not a third integrity exception, only a third ecosystem covered by
-    the one Phase A already introduced.
+    It is version-pin-only (no checksum field; the approved-version
+    list is the entire security boundary), so this is not a third
+    integrity exception, only a third ecosystem covered by the one
+    Phase A already introduced.
+    (pypi records later gained optional, always-enforced artifact
+    hashes — see item 13 below; npm and cargo remain version-pin-only.)
     The one thing cargo does differently from npm/pypi: it has no
     runner-selection variable, because cargo is the only tool that can
     build a crate from source — there is nothing to choose between.
@@ -102,6 +105,17 @@ this document states the resulting rules in plain language.
     verified on bun 1.3.14.
     No new catalog surface: bun installs the same npm tool records
     Phase A introduced.
+13. **pypi version records gained optional, always-enforced artifact
+    hashes, and the npm/cargo version grammar accepts uppercase
+    prerelease/build identifiers.**
+    A pypi record may carry the `sha256:` digests of its release files
+    (recorded by default at approval, `--no-hashes` opts out);
+    recorded hashes are enforced through pip's hash-checking download
+    before pipx installs the verified local file,
+    and the uv runner refuses a hashed record outright.
+    npm and cargo stay version-pin-only.
+    The grammar widening keeps the core triple digits-only
+    and every character shell-safe.
 
 ## 1. Overview
 
@@ -1103,11 +1117,14 @@ ecosystem already knows it by:
 { "name": "tokei", "type": "cargo", "crate": "tokei" }
 ```
 
-`versions.json` carries a bare version and, deliberately, no checksum
-field at all: none of these ecosystems supports an ad-hoc per-install
-content hash the way go's `h1` does, so these types are version-pin-only
-by design, and the approved-version list is the entire security boundary
-for them, exactly as it already is for an `h1`-less go record.
+`versions.json` carries a bare version for npm and cargo —
+deliberately no checksum field, since neither ecosystem supports an
+ad-hoc per-install content hash the way go's `h1` does —
+and the approved-version list is their entire security boundary,
+exactly as it already is for an `h1`-less go record.
+A pypi record may additionally carry always-enforced `sha256:` artifact
+digests (pip's hash-checking mode verifies the download before pipx
+installs the verified file; uv refuses a hashed record).
 
 The load-bearing difference from every other tool type is the network
 model.
@@ -1815,7 +1832,8 @@ access can be completely disabled", and "No public fallback occurs"
 hold exactly as written for those types, unchanged.
 npm, pypi, and cargo tool types (section 14.5, Phases A and B, landed
 after this PoC) carry a different, later-documented network model:
-they are version-pin-only (no checksum field exists for them) and they
+npm and cargo are version-pin-only, a pypi record may carry
+always-enforced artifact hashes, and all three
 install through the user's own ecosystem registry configuration rather
 than only from Nexus, so "Public Internet access can be completely
 disabled" for them depends on where that registry points, and "no

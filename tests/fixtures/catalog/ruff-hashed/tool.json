@@ -1,0 +1,6 @@
+{
+  "name": "ruff-hashed",
+  "type": "pypi",
+  "package": "ruff",
+  "bin": "ruff"
+}

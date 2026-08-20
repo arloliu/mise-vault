@@ -114,6 +114,10 @@ new configuration channel on top.
   bun is the opt-in npm runner: it reads the same registry channel as
   npm (`.npmrc`), and installs with `bun add -g <package>@<version>`.
 - `MISE_VAULT_PYPI_RUNNER=pipx|uv` (default `pipx`).
+  A pypi record that carries artifact hashes installs only through pipx.
+  uv has no hash-checking mode,
+  so it refuses such a record outright,
+  naming the fix instead of silently skipping the check.
 - There is no `MISE_VAULT_CARGO_RUNNER`: cargo is the only tool that can
   build a crate from source, so it is always the runner for a cargo
   tool — nothing to choose.
@@ -144,6 +148,26 @@ still works, but no-leftover-files and pinned-backend behavior need a
 recent pipx.
 The pins are always set anyway; an old pipx just ignores the ones it
 does not understand.
+
+### Artifact hashes for pypi tools
+
+A pypi version record may carry the `sha256:` digests
+of every release file of that version.
+The approval tooling records them by default,
+reading the same package index it already probes;
+`--no-hashes` records an explicit version-pin-only entry instead.
+Recorded hashes are always enforced.
+The install runs in two steps:
+pip first downloads the artifact in hash-checking mode
+(`pip download --require-hashes`, via your own `pip.conf` channel)
+and aborts on any mismatch;
+pipx then installs the verified local file.
+This needs `python3` with `pip` available on the machine.
+The hashes cover the tool's own artifact, not its dependency tree —
+prefer dependency-free tools, as the catalog guideline already says.
+npm and cargo records carry no hash field:
+neither ecosystem supports an ad-hoc per-install content hash,
+so their approved-version list remains the entire boundary.
 
 ### Verified runner versions
 
@@ -193,7 +217,8 @@ metadata.lua       plugin identity
 hooks/             mise backend hooks: list versions, install, exec env
 lib/               shared Lua helpers
 catalog/<tool>/    tool.json (packaging) + versions.json (approved versions;
-                   sha256 for prebuilt-artifact tools, no checksum field for npm/pypi/cargo)
+                   sha256 for prebuilt-artifact tools, optional always-enforced
+                   pip hashes for pypi, no checksum field for npm/cargo)
 config/            default Nexus base URL
 schemas/           JSON Schemas for catalog files
 scripts/           add-version, validate-catalog, verify-artifacts, vault-sync

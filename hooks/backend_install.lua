@@ -398,6 +398,26 @@ local function install_npm_tool(ctx, tool, vrec, common, cmd, strings)
     return {}
 end
 
+--- Shared "pipx install <target>" step for install_pypi_tool: the same
+--- trailer discipline and error text serve both the unhashed path
+--- (target is the version spec) and the hash-enforced path (target is
+--- the file pip already verified) so the two arms cannot drift apart.
+local function pipx_install(ctx, pipx_env, bin_dir, target, q, cmd, strings)
+    -- Same trailer discipline as every other runner in this file: the
+    -- last line is an unconditional numeric exit-status marker, never a
+    -- fixed success word, because install output is attacker-influenced
+    -- text.
+    local out = cmd.exec(
+        "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. pipx_env ..
+        " pipx install " .. target .. " 2>&1 || st=$?; } && echo \"PIPXINSTALL_EXIT=$st\"")
+    local status = out:match("PIPXINSTALL_EXIT=(%d+)%s*$")
+    if status ~= "0" then
+        local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
+        error("pipx install failed for " .. ctx.tool .. " " .. ctx.version ..
+              (detail ~= "" and (": " .. detail) or ""))
+    end
+end
+
 --- Install a tool published to PyPI, via the runner selected by
 --- MISE_VAULT_PYPI_RUNNER (pipx by default, uv opt-in). linux/darwin only,
 --- for the same reason as the npm branch above.
@@ -414,8 +434,28 @@ local function install_pypi_tool(ctx, tool, vrec, common, cmd, strings)
     common.check_pep440_envelope(ctx.version, "version")
     local bin_name = tool.bin or ctx.tool
     common.check_bin_name(bin_name, "bin")
+    -- Recorded pip hashes are the artifact digests of this version's own
+    -- release files.
+    -- They are always enforced when present — there is no way to skip
+    -- them at install time (see the pipx branch below).
+    if vrec.hashes ~= nil then
+        common.check_pip_hashes(vrec.hashes, "hashes")
+    end
 
     local runner = pypi_runner_choice()
+
+    -- uv has no hash-checking mode: "uv tool install" accepts nothing
+    -- equivalent to pip's --require-hashes, so a hash-enforced record can
+    -- never be installed through it.
+    -- Refuse before even checking whether uv is on PATH, so this specific
+    -- message always wins over a generic "uv not found" and stays the
+    -- same regardless of this machine's runner installation state.
+    if runner == "uv" and vrec.hashes ~= nil then
+        error(ctx.tool .. " " .. ctx.version .. " has recorded pip hashes, but uv tool " ..
+              "install has no hash-checking mode to enforce them — use the pipx runner " ..
+              "instead (unset MISE_VAULT_PYPI_RUNNER, or set it to pipx)")
+    end
+
     require_runner(runner, cmd, strings, common)
 
     -- Same reasoning as the npm branch above: pipx and uv write only under
@@ -443,18 +483,100 @@ local function install_pypi_tool(ctx, tool, vrec, common, cmd, strings)
             " PIPX_MAN_DIR=" .. q(file.join_path(ctx.install_path, "share", "man")) ..
             " PIPX_COMPLETION_DIR=" .. q(file.join_path(ctx.install_path, "share")) ..
             " PIPX_DEFAULT_BACKEND=pip PIPX_FETCH_PYTHON=never PIP_DISABLE_PIP_VERSION_CHECK=1"
-        -- pipx has no equivalent of "npm config get registry" to report
-        -- (it installs through pip, reading pip.conf); printing nothing is
-        -- better than printing something wrong.
-        print("mise-vault: installing " .. tool.package .. "==" .. ctx.version .. " via pipx")
-        out = cmd.exec(
-            "mkdir -p " .. q(bin_dir) .. " && st=0 && { " .. pipx_env ..
-            " pipx install " .. spec .. " 2>&1 || st=$?; } && echo \"PIPXINSTALL_EXIT=$st\"")
-        local status = out:match("PIPXINSTALL_EXIT=(%d+)%s*$")
-        if status ~= "0" then
-            local detail = strings.split(strings.trim_space(out), "\n")[1] or ""
-            error("pipx install failed for " .. ctx.tool .. " " .. ctx.version ..
-                  (detail ~= "" and (": " .. detail) or ""))
+
+        if vrec.hashes == nil then
+            -- pipx has no equivalent of "npm config get registry" to
+            -- report (it installs through pip, reading pip.conf);
+            -- printing nothing is better than printing something wrong.
+            print("mise-vault: installing " .. tool.package .. "==" .. ctx.version ..
+                  " via pipx")
+            pipx_install(ctx, pipx_env, bin_dir, spec, q, cmd, strings)
+        else
+            -- pip's own CLI refuses "--require-hashes" together with a
+            -- bare command-line requirement even when the identical
+            -- requirement also appears, hashed, inside a requirements
+            -- file passed via -r (verified empirically today).
+            -- pipx has no way to hand pip only a requirements file, so
+            -- "pipx install <spec> --pip-args '--require-hashes -r
+            -- <file>'" cannot work: pip rejects the command-line spec
+            -- before it ever reads the file.
+            -- The working mechanism is two stages instead: pip downloads
+            -- and verifies the artifact against the recorded digests on
+            -- its own (stage 1), then pipx installs the already-verified
+            -- local file (stage 2, through the exact same pin
+            -- environment as the unhashed path above).
+            -- The hashes cover only this tool's own artifact, not its
+            -- dependency tree — the same scope this file already
+            -- documents for npm/pypi/cargo installs generally; ruff, the
+            -- only pypi tool approved today, has zero dependencies.
+            local pip_ok = strings.trim_space(cmd.exec(
+                "python3 -m pip --version >/dev/null 2>&1 && echo PIPOK || true"))
+            if pip_ok ~= "PIPOK" then
+                error("hash-enforced pypi installs download through pip; install python3 " ..
+                      "with pip and retry")
+            end
+
+            -- Scratch space for the requirements file and the downloaded
+            -- artifact, named and cleared the same way install_go_tool
+            -- clears its module/build caches under ctx.download_path: a
+            -- prior failed attempt must never leave a stale file behind
+            -- for the file-count guard below to trip over.
+            local pipdl = file.join_path(ctx.download_path, "pipdownload")
+            local dl_dir = file.join_path(pipdl, "dist")
+            local req_file = file.join_path(pipdl, "requirements.txt")
+            cmd.exec("rm -rf " .. q(pipdl) .. " 2>&1 || true")
+            if file.exists(pipdl) then
+                error("could not clear the previous pip download scratch directory under " ..
+                      ctx.download_path .. " — remove it manually, then retry")
+            end
+
+            -- Every value here already passed common.check_pypi_package,
+            -- common.check_pep440_envelope, or common.check_pip_hashes,
+            -- but the whole requirements line is still shell-quoted as
+            -- one value when it is written, the same defense in depth
+            -- every other interpolated value in this file gets.
+            local req_line = tool.package .. "==" .. ctx.version
+            for _, h in ipairs(vrec.hashes) do
+                req_line = req_line .. " --hash=" .. h
+            end
+
+            print("mise-vault: installing " .. tool.package .. "==" .. ctx.version ..
+                  " via pipx (hash-enforced: " .. #vrec.hashes .. " recorded sha256 digests)")
+
+            -- Same trailer discipline as every other install step in this
+            -- file: an unconditional numeric exit-status marker as the
+            -- very last line, never a fixed success word, because pip's
+            -- own output is attacker-influenced text.
+            local dlout = cmd.exec(
+                "mkdir -p " .. q(dl_dir) .. " && printf '%s\\n' " .. q(req_line) .. " > " ..
+                q(req_file) .. " && st=0 && { PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip " ..
+                "download --require-hashes --no-deps --no-cache-dir -r " .. q(req_file) ..
+                " -d " .. q(dl_dir) .. " 2>&1 || st=$?; } && echo \"PIPDOWNLOAD_EXIT=$st\"")
+            local dlstatus = dlout:match("PIPDOWNLOAD_EXIT=(%d+)%s*$")
+            if dlstatus ~= "0" then
+                local detail = strings.split(strings.trim_space(dlout), "\n")[1] or ""
+                error("pip download failed for " .. ctx.tool .. " " .. ctx.version ..
+                      (detail ~= "" and (": " .. detail) or ""))
+            end
+
+            -- pip already verified every downloaded file's sha256 against
+            -- the recorded set (it aborts on mismatch or on an
+            -- unrecorded file), so the only thing left to confirm is
+            -- that exactly one artifact landed here: a release with more
+            -- than one matching file, or none, is not something the
+            -- pipx install below can be pointed at unambiguously.
+            local count_out = cmd.exec(
+                "n=$(ls -1 " .. q(dl_dir) .. " 2>/dev/null | wc -l | tr -d ' ') && " ..
+                "f=$(ls -1 " .. q(dl_dir) .. " 2>/dev/null | head -n1) && " ..
+                "echo \"PIPFILES=$n:$f\"")
+            local n, fname = count_out:match("PIPFILES=(%d+):(.-)%s*$")
+            if n ~= "1" then
+                error("pip download for " .. ctx.tool .. " " .. ctx.version .. " produced " ..
+                      tostring(n) .. " file(s) under " .. dl_dir .. " (expected exactly 1)")
+            end
+            local downloaded = file.join_path(dl_dir, fname)
+
+            pipx_install(ctx, pipx_env, bin_dir, q(downloaded), q, cmd, strings)
         end
     else
         -- UV_TOOL_DIR/UV_TOOL_BIN_DIR: uv is a managed-environment

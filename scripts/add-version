@@ -33,10 +33,20 @@ For a pypi tool:
      (refuse otherwise, naming the normalized form — never rewritten here),
   2. resolve the index base URL (explicit --pypi-index-url, else
      "pip config get global.index-url", tried under "pip" then "pip3"),
-  3. GET the simple API page for the package with PEP 691 JSON content
-     negotiation, falling back to parsing PEP 503 HTML anchors when the
-     index answers HTML, and confirm the requested version is listed,
-  4. append {version} to versions.json (no checksum for this type).
+  3. GET the simple API page for the package once, with PEP 691 JSON
+     content negotiation, falling back to parsing PEP 503 HTML anchors
+     when the index answers HTML, and confirm the requested version is
+     listed,
+  4. unless --no-hashes was given, collect the sha256 of every file of the
+     requested version from that same already-fetched index document
+     (PEP 691 JSON files[].hashes.sha256, or an HTML anchor's
+     "#sha256=<hex>" URL fragment) — any matching file missing a digest,
+     or no matching file at all, aborts (--no-hashes is the explicit
+     opt-out, recording a version-pin-only entry instead),
+  5. append {version, [hashes]} to versions.json — hashes is a sorted,
+     de-duplicated list of "sha256:<hex>" strings, mirroring the go h1
+     convention: recorded by default, omitted only when --no-hashes was
+     passed explicitly, and enforced at install time whenever present.
 
 For a cargo tool:
   1. resolve the index base URL (explicit --cargo-index-url; else
@@ -66,7 +76,7 @@ Usage:
                       [--catalog-dir DIR] [--dry-run]
   scripts/add-version <npm-tool> <version> [--npm-registry-url URL]
                       [--catalog-dir DIR] [--dry-run]
-  scripts/add-version <pypi-tool> <version> [--pypi-index-url URL]
+  scripts/add-version <pypi-tool> <version> [--pypi-index-url URL] [--no-hashes]
                       [--catalog-dir DIR] [--dry-run]
   scripts/add-version <cargo-tool> <version> [--cargo-index-url URL]
                       [--catalog-dir DIR] [--dry-run]
@@ -83,6 +93,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SHA256_RE = re.compile(r"\b([0-9a-f]{64})\b")
 H1_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=\Z")
+# The pypi artifact-hash counterpart to H1_RE above: a bare lowercase-hex
+# sha256, checked before any collected hash is ever recorded.
+HASH_RE = re.compile(r"^[0-9a-f]{64}\Z")
 MODULE_RE = re.compile(
     r"^[a-z0-9]+(?:[a-z0-9-]*\.[a-z0-9-]+)+(?:/[a-z0-9_~-](?:[a-z0-9._~-]*[a-z0-9_~-])?)+\Z")
 # Base URLs get the same shape check the plugin applies at install time,
@@ -401,61 +414,137 @@ def pypi_version_in_filenames(filenames, package, version):
     return False, checked_any
 
 
-def pypi_version_exists(index, package, version):
-    """GET the simple API page with PEP 691 JSON content negotiation.
-    Preferred: the PEP 700 "versions" list (exact, when the index provides
-    it — pypi.org does). Fallback for a PEP 691-only JSON index, or an
-    index that answers HTML instead: derive versions from the listed
-    file names (PEP 503 anchor text equals the filename)."""
+def pypi_fetch_index(index, package):
+    """GET the simple API page with PEP 691 JSON content negotiation,
+    falling back to a PEP 503 HTML page, exactly once — both the
+    existence check and the artifact-hash collection are derived from
+    this single fetch, so approving one version never requests the
+    index twice.
+
+    Returns (reason, None, url) on any failure (unreachable, redirect,
+    non-200, unparseable body, a JSON body with no usable "versions" or
+    "files" list, or an unrecognized content type). On success returns
+    (None, parsed, url), where parsed is a dict:
+      "kind": "json" or "html"
+      "versions": the PEP 700 "versions" list when the JSON index
+        provides one (exact — pypi.org does), else None (also None for
+        an HTML index, which has no such list)
+      "files": a list of (filename, sha256_or_none) pairs. filename is
+        the PEP 691 "filename" field, or an HTML anchor's text (PEP 503:
+        anchor text equals the filename). sha256_or_none is read from
+        PEP 691 files[].hashes.sha256, or from an HTML anchor's
+        "#sha256=<hex>" URL fragment; None when the index exposes
+        neither for that file.
+    """
     url = f"{index.rstrip('/')}/{package}/"
     accept = "application/vnd.pypi.simple.v1+json, text/html;q=0.1"
     marker = "\x1e"
     r = curl(["-H", f"Accept: {accept}",
               "-w", f"{marker}%{{http_code}}{marker}%{{content_type}}", url], follow=False)
     if r.returncode != 0:
-        return f"unreachable ({curl_error(r)})", url
+        return f"unreachable ({curl_error(r)})", None, url
     body, _, rest = (r.stdout or "").partition(marker)
     code, _, ctype = rest.partition(marker)
     if code in ("404", "410"):
-        return f"package not found at the PyPI simple index (HTTP {code})", url
+        return f"package not found at the PyPI simple index (HTTP {code})", None, url
     if code.startswith("3"):
-        return f"server redirected (HTTP {code}) — redirects are refused", url
+        return f"server redirected (HTTP {code}) — redirects are refused", None, url
     if code != "200":
-        return f"unexpected HTTP {code}", url
+        return f"unexpected HTTP {code}", None, url
 
     ctype = ctype.split(";")[0].strip().lower()
     if "json" in ctype:
         try:
             doc = json.loads(body)
         except json.JSONDecodeError:
-            return "PyPI simple index JSON response was not valid JSON", url
+            return "PyPI simple index JSON response was not valid JSON", None, url
         versions_list = doc.get("versions")
-        if isinstance(versions_list, list):
-            if version in versions_list:
-                return None, url
-            return "version not listed in the PyPI simple index (PEP 700 versions list)", url
+        if not isinstance(versions_list, list):
+            versions_list = None
         files = doc.get("files")
         if not isinstance(files, list):
-            return ("PyPI simple index JSON response has no usable "
-                    "\"versions\" or \"files\" list"), url
-        filenames = [f.get("filename", "") for f in files if isinstance(f, dict)]
-        found, checked_any = pypi_version_in_filenames(filenames, package, version)
-        if not checked_any:
-            return "PyPI simple index JSON file list had no parseable filenames", url
-        if found:
-            return None, url
-        return "version not found among the PyPI simple index's listed files", url
+            if versions_list is None:
+                return ("PyPI simple index JSON response has no usable "
+                        "\"versions\" or \"files\" list"), None, url
+            files = []
+        entries = []
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            filename = f.get("filename", "")
+            hashes = f.get("hashes")
+            sha = hashes.get("sha256") if isinstance(hashes, dict) else None
+            entries.append((filename, sha if isinstance(sha, str) else None))
+        return None, {"kind": "json", "versions": versions_list, "files": entries}, url
 
     if "html" in ctype or body.lstrip().lower().startswith(("<!doctype", "<html")):
-        filenames = re.findall(r"<a\b[^>]*>([^<]+)</a>", body, re.IGNORECASE)
-        found, checked_any = pypi_version_in_filenames(filenames, package, version)
-        if not checked_any:
-            return "PyPI simple index HTML response had no parseable file links", url
-        if found:
-            return None, url
-        return "version not found among the PyPI simple index's listed files (HTML)", url
+        entries = []
+        for attrs, text in re.findall(r"<a\b([^>]*)>([^<]+)</a>", body, re.IGNORECASE):
+            href_m = re.search(r'href\s*=\s*["\']([^"\']*)["\']', attrs, re.IGNORECASE)
+            href = href_m.group(1) if href_m else ""
+            frag_m = re.search(r"#sha256=([0-9a-fA-F]{64})\b", href)
+            sha = frag_m.group(1).lower() if frag_m else None
+            entries.append((text, sha))
+        return None, {"kind": "html", "versions": None, "files": entries}, url
 
-    return f"PyPI simple index returned an unrecognized content type ({ctype or 'none'})", url
+    return f"PyPI simple index returned an unrecognized content type ({ctype or 'none'})", None, url
+
+
+def pypi_version_exists(parsed, package, version):
+    """Given a document already fetched by pypi_fetch_index, decide
+    whether the requested version is listed. Preferred: the PEP 700
+    "versions" list (exact, when the index provides one). Fallback for a
+    PEP 691-only JSON index, or an index that answered HTML instead:
+    derive versions from the listed file names. Returns None on success,
+    or a reason string."""
+    if parsed["kind"] == "json" and parsed["versions"] is not None:
+        if version in parsed["versions"]:
+            return None
+        return "version not listed in the PyPI simple index (PEP 700 versions list)"
+    filenames = [name for name, _sha in parsed["files"]]
+    found, checked_any = pypi_version_in_filenames(filenames, package, version)
+    if not checked_any:
+        if parsed["kind"] == "json":
+            return "PyPI simple index JSON file list had no parseable filenames"
+        return "PyPI simple index HTML response had no parseable file links"
+    if found:
+        return None
+    if parsed["kind"] == "json":
+        return "version not found among the PyPI simple index's listed files"
+    return "version not found among the PyPI simple index's listed files (HTML)"
+
+
+def pypi_collect_hashes(parsed, package, version):
+    """Collect the sha256 of every file in an already-fetched index that
+    matches the known package name and target version — the same match
+    pypi_version_exists relies on (pypi_filename_matches_sdist /
+    pypi_filename_matches_wheel), so "which files belong to this
+    version" has exactly one definition.
+
+    Returns (hashes, incomplete). hashes is a sorted, de-duplicated list
+    of "sha256:<hex>" strings. incomplete is True when no file matched
+    at all, or when at least one matching file has no usable sha256
+    (missing, or not a bare lowercase-hex digest per HASH_RE) — either
+    way there is no complete set to enforce at install time, and pip's
+    --require-hashes mode needs the hash of whichever one file it picks
+    for the platform, so a partial set would fail installs on whatever
+    platform's file was left out."""
+    hashes = set()
+    matched_any = False
+    complete = True
+    for filename, sha in parsed["files"]:
+        if not (pypi_filename_matches_sdist(filename, package, version) or
+                pypi_filename_matches_wheel(filename, package, version)):
+            continue
+        matched_any = True
+        lowered = sha.lower() if isinstance(sha, str) else None
+        if lowered and HASH_RE.match(lowered):
+            hashes.add(f"sha256:{lowered}")
+        else:
+            complete = False
+    if not matched_any:
+        complete = False
+    return sorted(hashes), not complete
 
 
 # --- Shared cargo helpers: kept byte-identical between scripts/add-version
@@ -799,12 +888,33 @@ def add_pypi_version(args, tool, versions_file, versions):
         sys.exit(f"error: refusing unsafe PyPI index URL: {index!r}")
 
     print(f"pypi package: {package}  (index from {source}: {index})")
-    reason, url = pypi_version_exists(index, package, args.version)
+    reason, parsed, url = pypi_fetch_index(index, package)
+    if reason is not None:
+        sys.exit(f"error: {reason}: {url}")
+    reason = pypi_version_exists(parsed, package, args.version)
     if reason is not None:
         sys.exit(f"error: {reason}: {url}")
     print(f"  exists at PyPI simple index: {url}")
 
     record = {"version": args.version}
+    if args.no_hashes:
+        print("  --no-hashes: recording a version-pin-only entry "
+              "(no artifact hash check at install time)")
+    else:
+        hashes, incomplete = pypi_collect_hashes(parsed, package, args.version)
+        if incomplete:
+            # A version-pin-only entry is an explicit operator decision, never
+            # a silent downgrade: if a complete hash set cannot be obtained,
+            # stop.
+            sys.exit(f"error: the PyPI simple index does not expose a sha256 "
+                     f"digest for every file of {package} {args.version} ({url}); "
+                     f"fix that, or pass --no-hashes to deliberately record a "
+                     f"version-pin-only entry with no artifact hash check at "
+                     f"install time")
+        record["hashes"] = hashes
+        print(f"  {len(hashes)} sha256 hash(es) from the PyPI simple index: "
+              + ", ".join(hashes))
+
     versions.append(record)
     rendered = json.dumps(versions, indent=2) + "\n"
     if args.dry_run:
@@ -863,6 +973,9 @@ def main():
     ap.add_argument("--pypi-index-url",
                     help="pypi tools only: explicit override; else pip config get "
                          "global.index-url")
+    ap.add_argument("--no-hashes", action="store_true",
+                    help="pypi tools only: record a version-pin-only entry, skip "
+                         "artifact hash collection")
     ap.add_argument("--cargo-index-url",
                     help="cargo tools only: explicit override; else the index named by "
                          "[source.crates-io] replace-with in ~/.cargo/config.toml (or "

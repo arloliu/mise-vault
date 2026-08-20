@@ -585,3 +585,23 @@ poc-test: 96/96.
 | D41 | **`seed-artifacts.sh`'s ecosystem cache warming became catalog-driven — one real install or download per approved version of every npm, pypi, and cargo catalog tool, each pulling its full dependency closure through the proxy.** The previous blocks hardcoded prettier, ruff, and tokei, so approving a new tool silently left a freshly seeded stack's proxy cache without it — caught in review when the offline spectral case was passing only against a cache warmed by earlier online suite runs, not by the documented seeding path. Catalog-driven warming means approving a new ecosystem tool never needs a matching seed-script edit, and the fix was proven by wiping the npm-proxy cache completely and re-running the seed before the offline gate. That reproduction surfaced a second latent trap: with the seeding machine's own `~/.npm` cache warm, `npm install` fetched the package documents through the proxy but served every tarball from local disk, leaving a cache that looked seeded and failed the first offline install with a 502 on the tarball path — the warming now runs npm against an isolated, empty cache directory so every tarball really crosses the proxy. |
 
 ---
+## 24. Deferred-items hardening — grammar, pip hashes, config rules (2026-08-20)
+
+The three deferred items recorded after Phase C landed together on one
+branch: the npm/cargo version-grammar widening, pip-style artifact
+hashes for pypi records, and the exact production registry-configuration
+rules documented where operators read them.
+The owner's own production files still need a one-time check against
+those rules (`pip.conf` `trusted-host` equal to the index host,
+cargo's outbound proxy under `[http]` not `[net]`,
+uv `allow-insecure-host` as a list) —
+only the rules' documentation could land here.
+poc-test: 102/102.
+
+| # | Decision |
+|---|---|
+| D42 | **The npm/cargo semver envelope accepts uppercase prerelease and build identifiers; the core triple stays digits-only.** Schema, validator, runtime grammar, and fixtures moved together, as section 3 of the ecosystem spec reserved. pypi stays lowercase on purpose (PEP 440 normalization lowercases pre-release markers, so the normalized form is the only one worth approving) and go stays unchanged (an uppercase go version would need go-proxy escaping the tooling does not implement). Approval-side acceptance is proven against mock registries listing an uppercase prerelease; the flipped uppercase fixture became valid-sample coverage, and two previously schema-catchable fixtures (go-version-uppercase, pypi-version-uppercase-local) moved to cross-check-only: their values now legally satisfy the widened npm/cargo bare-version shape in the schema's anyOf, so only the validator's per-type dispatch rejects them. |
+| D43 | **pypi records may carry always-enforced pip artifact hashes; enforcement is two-stage because pip rejects a command-line requirement in --require-hashes mode even when the identical requirement appears hashed in the requirements file (verified empirically).** `pip download --require-hashes --no-deps` verifies the artifact against the recorded set through the user's own pip.conf channel, then pipx installs the verified local file under the unchanged placement pins. Approval records the sha256 of every release file by default from the simple-index document the existence probe already fetches (PEP 691 JSON hashes and the HTML #sha256= fragments both verified against pypi.org AND the experiment Nexus proxy, with matching digests); partial coverage is refused, `--no-hashes` is the explicit version-pin-only opt-out mirroring go's `--no-h1`. The uv runner refuses a hashed record outright — uv tool install has no hash-checking mode, and switching runners must never silently skip a recorded check. |
+| D44 | **The real catalog's ruff record deliberately stays version-pin-only.** Recording hashes on ruff would make every uv install of it refuse, killing the uv runner's live end-to-end coverage while it remains a supported opt-in. The hash-enforced positive (real digests, real package, through the private proxy) and the tampered-hash negative run in poc-test through fixture tools (ruff-hashed, ruff-bad-hash) injected the same way the wrong-sha256 and wrong-h1 fixtures already are. The offline gate needs no hashed case of its own: the hashed path's network shape (simple page + wheel through the proxy) is identical to the bare pipx path it already proves, and the hash comparison itself is local. |
+
+---

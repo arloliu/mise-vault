@@ -37,6 +37,10 @@ plugin's), with runners chosen by
 `MISE_VAULT_NPM_RUNNER` / `MISE_VAULT_PYPI_RUNNER`.
 Version-pin-only integrity (no h1 analogue exists);
 the approved-version list stays the boundary.
+(Since amended: pypi records may now carry always-enforced artifact
+hashes, and the npm/cargo version grammar accepts uppercase
+prerelease/build identifiers —
+the design spec's implementation notes are authoritative.)
 Rollout: Phase A npm+pypi, Phase B cargo, Phase C bun runner.
 
 All open questions at the end of the design spec were resolved with

@@ -36,7 +36,8 @@ metadata.lua            plugin identity (backend plugin name: vault)
 hooks/                  the three mise backend hooks (list versions, install, exec env)
 lib/common.lua          shared helpers: catalog loading, platform id, URL building
 catalog/<tool>/         tool.json (packaging) + versions.json (approved versions;
-                        sha256 for artifact tools, no checksum field for npm/pypi/cargo)
+                        sha256 for artifact tools, optional always-enforced pip
+                        hashes for pypi, no checksum field for npm/cargo)
 config/defaults.json    default Nexus base URL
 schemas/                JSON Schemas for the two catalog file types
 scripts/                catalog tooling: approve, add-version, validate-catalog, verify-artifacts, vault-sync
@@ -67,10 +68,17 @@ tmp/                    scratch area, not part of the deliverable
   A go-tool version record may omit its `h1` module checksum
   (an explicit proxy-trust entry, requiring `--no-h1` at approval time) —
   but a recorded `h1` is always enforced.
-  npm, pypi, and cargo tool types are version-pin-only by design:
-  none of these ecosystems supports an ad-hoc per-install content hash
+  npm and cargo tool types are version-pin-only by design:
+  neither ecosystem supports an ad-hoc per-install content hash
   the way go's `h1` does, so no checksum field exists for them at all,
   and there is nothing to make optional.
+  A pypi version record may carry pip-style `sha256:` artifact hashes —
+  recorded by default at approval time (requiring `--no-hashes` for an
+  explicit version-pin-only entry) — and recorded hashes are always
+  enforced: the pipx runner downloads through pip's hash-checking mode,
+  and the uv runner refuses a hashed record outright rather than
+  silently skipping the check (uv has no hash-checking mode).
+  The hashes cover the tool's own artifact, not its dependency tree.
   In every case the approved-version list still gates every install.
 - **Data over code.**
   Adding a normal tool means adding `catalog/<tool>/tool.json` and `versions.json`,

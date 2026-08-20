@@ -59,7 +59,7 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?(?![\\s\\S])",
-            "description": "Semver envelope (digits-only core; letters of either case only in the prerelease/build segments), shared verbatim by npm and cargo versions (both use the same grammar, so one branch covers both — see 'Implementation notes (Phase A)' in the design doc for why this schema uses anyOf rather than a duplicate identical branch per type). No checksum field for either type: none of these ecosystems supports an ad-hoc per-install content hash the way go's h1 does, so the approved-version list is the boundary, as it already is for a go record with no h1."
+            "description": "Semver envelope (digits-only core; letters of either case only in the prerelease/build segments), shared verbatim by npm and cargo versions (both use the same grammar, so one branch covers both; the schema uses anyOf rather than a duplicate identical branch per type because bare-version records legally overlap across ecosystems and only the validator's cross-file dispatch on tool.json's declared type can tell them apart). No checksum field for either type: none of these ecosystems supports an ad-hoc per-install content hash the way go's h1 does, so the approved-version list is the boundary, as it already is for a go record with no h1."
           }
         }
       },
@@ -73,7 +73,17 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^[0-9]+(\\.[0-9]+)*((a|b|rc)[0-9]+)?(\\.post[0-9]+)?(\\.dev[0-9]+)?(\\+[0-9a-z]+(\\.[0-9a-z]+)*)?(?![\\s\\S])",
-            "description": "PEP 440 envelope covering the common shapes; epochs and legacy version forms are deliberately not representable. No checksum field, for the same reason as the npm record above."
+            "description": "PEP 440 envelope covering the common shapes; epochs and legacy version forms are deliberately not representable."
+          },
+          "hashes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+            },
+            "description": "Optional pip artifact digests. When present the plugin downloads through pip's hash-checking mode and aborts on mismatch. When absent, the approved-version list is still the gate."
           }
         }
       }

@@ -551,11 +551,20 @@ at all in its `tool.json` — just the package or crate name:
 | `bin` | no | the executable name to verify and expose, when it differs from `name` (e.g. a future `httpie` entry would carry `"bin": "http"`); defaults to `name`, so when `bin` is absent, `name` itself must satisfy the bin grammar |
 | `env` | no | same as an artifact tool's `env` |
 
-`versions.json` carries a bare version and, deliberately, no checksum
-field: none of these ecosystems supports an ad-hoc per-install content
-hash the way go's `h1` does, so these types are version-pin-only, and
-the approved-version list is the entire security boundary for them —
+`versions.json` carries a bare version for npm and cargo —
+deliberately no checksum field, since neither ecosystem supports an
+ad-hoc per-install content hash the way go's `h1` does —
+so those two types are version-pin-only,
+and the approved-version list is their entire security boundary,
 exactly as it already is for an `h1`-less go record.
+A pypi record may additionally carry `hashes`,
+the `sha256:` digests of every release file of that version:
+recorded by default by `scripts/add-version`
+(`--no-hashes` records an explicit version-pin-only entry instead),
+compared against the index by `scripts/verify-artifacts --checksum`,
+and always enforced at install time through the pipx runner
+(the uv runner refuses a hashed record,
+since uv has no hash-checking mode).
 
 ```json
 [
