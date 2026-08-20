@@ -42,6 +42,7 @@ GOCENSUS_V = catalog.latest("gocensus", REPO_ROOT)
 GOCENSUS_ALL = catalog.versions("gocensus", REPO_ROOT)
 PRETTIER_V = catalog.latest("prettier", REPO_ROOT)
 RUFF_V = catalog.latest("ruff", REPO_ROOT)
+SPECTRAL_V = catalog.latest("spectral", REPO_ROOT)
 TOKEI_V = catalog.latest("tokei", REPO_ROOT)
 
 # A rustup-managed cargo stores its toolchain-selection state under
@@ -100,6 +101,7 @@ ALIASES = {
     "golangci-lint": f"vault:golangci-lint[nexus_url={NEXUS_HOST_URL}/repository/devtools]",
     "prettier": "vault:prettier",
     "ruff": "vault:ruff",
+    "spectral": "vault:spectral",
     "tokei": "vault:tokei",
 }
 home.write_aliases(ALIASES)
@@ -573,6 +575,26 @@ s.check("bun shim: no plugin-set BUN_*/DO_NOT_TRACK variable beyond the user's "
 # leave prettier cleanly installed via the default npm runner for any later
 # phase that execs it
 run(["mise", "install", "-f", f"prettier@{PRETTIER_V}"], env=home.env)
+
+# scoped package (@scope/name) end-to-end: the registry metadata URL for a
+# scoped name carries an encoded slash (@stoplight%2Fspectral-cli), a shape
+# the plain prettier cases never exercise, so this proves the whole chain --
+# catalog grammar, hook validation, proxy routing -- on a real scoped tool
+# with both runners
+s.check_cmd(f"install spectral@{SPECTRAL_V} (scoped npm package, npm runner)",
+            ["mise", "install", f"spectral@{SPECTRAL_V}"], env=home.env)
+r = run(["mise", "exec", f"spectral@{SPECTRAL_V}", "--", "spectral", "--version"], env=home.env)
+s.check(f"spectral runs and reports {SPECTRAL_V}", SPECTRAL_V in r.out, detail=r.tail())
+r = run(["mise", "tool", "spectral", "--backend"], env=home.env)
+s.check("mise tool spectral resolves to the vault backend", r.out.strip() == "vault:spectral",
+        detail=f"got: {r.out.strip()!r}; {r.tail()}")
+s.check_cmd(f"install spectral@{SPECTRAL_V} (scoped npm package, bun runner)",
+            ["mise", "install", "-f", f"spectral@{SPECTRAL_V}"], env=bun_env())
+r = run(["mise", "exec", f"spectral@{SPECTRAL_V}", "--", "spectral", "--version"], env=home.env)
+s.check(f"spectral (bun) runs and reports {SPECTRAL_V}", SPECTRAL_V in r.out, detail=r.tail())
+r = run(["mise", "install", f"spectral@9.9.9"], env=home.env)
+s.check("unapproved spectral version rejected",
+        (not r.ok) and "spectral 9.9.9 is not an approved version" in (r.out + r.err), detail=r.tail())
 
 s.phase(f"Phase 4d: pypi-installed tool (ruff, via pipx/uv through {PYPI_PROXY_SIMPLE_URL})")
 s.check_cmd(f"install ruff@{RUFF_V} (pipx runner — default, USER-ENV pip.conf index-url)",

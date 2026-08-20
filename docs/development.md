@@ -43,8 +43,8 @@ docker compose up -d                  # Nexus is healthy in ~1 min; GitLab takes
 ./scripts/provision-gitlab.sh         # project, tokens, users (idempotent; waits for boot)
 ./scripts/provision-runner.sh         # CI runner + project variables (idempotent)
 ./scripts/seed-artifacts.sh           # real linux-amd64 tool artifacts, plus warms the
-                                       # npm-proxy/pypi-proxy caches for prettier/ruff and the
-                                       # cargo-proxy cache for tokei's full dependency closure
+                                       # npm/pypi/cargo proxy caches with every approved
+                                       # version of every catalog tool of those types
                                        # (public internet, once)
 ./scripts/seed-extra-platforms.sh     # linux-arm64 + darwin-arm64 artifacts (public internet, once)
 docker build -t mise-vault-test test-image/   # workstation-like image for offline/CI tests
@@ -53,9 +53,14 @@ docker build -t mise-vault-test test-image/   # workstation-like image for offli
 `provision-nexus.sh` creates the `npm-proxy`, `pypi-proxy`, and
 `cargo-proxy` repositories used by the npm/pypi/cargo tool-type suites,
 and the offline gate's npm/pypi/cargo cases depend on `seed-artifacts.sh`
-having warmed those caches with `prettier@3.9.6`, `ruff==0.16.3`, and
-tokei's full dependency closure (a real `cargo install --locked`
-against the proxy) — an unwarmed cache means those cases have nothing
+having warmed those caches.
+The warming is catalog-driven:
+one real install or download per approved version
+of every npm, pypi, and cargo catalog tool,
+each pulling its full dependency closure through the proxy
+(the scoped `@stoplight/spectral-cli` included) —
+so approving a new tool needs no seed-script edit,
+and an unwarmed cache means those cases have nothing
 to install from once the network is severed.
 If your stack was provisioned before these repos existed,
 re-run `./scripts/provision-nexus.sh` once:

@@ -77,9 +77,10 @@ and generates `~/.config/mise/conf.d/mise-vault.toml`
 
 ## npm, pypi, and cargo tools
 
-Some catalog tools (`prettier` is the current npm example, `ruff` the
-current pypi example, `tokei` the current cargo example) are not
-prebuilt artifacts:
+Some catalog tools are not prebuilt artifacts
+(`prettier` and the scoped `spectral` — package
+`@stoplight/spectral-cli` — are the current npm examples,
+`ruff` the current pypi example, `tokei` the current cargo example):
 `mise install` runs the ecosystem's own package manager
 (npm, bun, pipx, uv, or cargo) against the registry YOUR machine already
 talks to.

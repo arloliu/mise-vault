@@ -1090,6 +1090,9 @@ branch per ecosystem, never per-tool code.
 
 prettier (npm) and ruff (pypi) are the Phase A examples; tokei (cargo)
 is the Phase B example.
+spectral (npm, package `@stoplight/spectral-cli`)
+joined later as the first scoped-package example,
+proving the `@scope/name` shape end-to-end.
 Like a go-installed tool, there is no artifact to download and no
 `platforms` entry in `tool.json` — just the package or crate name the
 ecosystem already knows it by:

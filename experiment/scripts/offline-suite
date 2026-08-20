@@ -174,10 +174,12 @@ uv_dir.mkdir(parents=True, exist_ok=True)
 
 aliases["prettier"] = "vault:prettier"
 aliases["ruff"] = "vault:ruff"
+aliases["spectral"] = "vault:spectral"
 write_aliases(HOME, aliases)
 
 PRETTIER_V = safe_latest("prettier", "/tmp/bootstrap")
 RUFF_V = safe_latest("ruff", "/tmp/bootstrap")
+SPECTRAL_V = safe_latest("spectral", "/tmp/bootstrap")
 
 install_r = run(["mise", "install", f"prettier@{PRETTIER_V}"], env=ENV)
 if install_r.ok:
@@ -212,6 +214,20 @@ if prettier_bun_ok:
          "(package document + tarball from private npm-proxy)")
 else:
     s.bad(f"prettier bun install ({install_r.tail()})")
+
+# scoped package (@scope/name): the metadata request for a scoped name uses
+# an encoded slash in the URL path, so this proves the private npm-proxy
+# serves that shape from its cache with zero public internet
+install_r = run(["mise", "install", f"spectral@{SPECTRAL_V}"], env=ENV)
+if install_r.ok:
+    exec_r = run(["mise", "exec", f"spectral@{SPECTRAL_V}", "--", "spectral", "--version"], env=ENV)
+    spectral_ok = bool(SPECTRAL_V) and exec_r.ok and SPECTRAL_V in exec_r.out
+else:
+    spectral_ok = False
+if spectral_ok:
+    s.ok("spectral installed via npm (scoped package document + tarballs from private npm-proxy)")
+else:
+    s.bad(f"spectral install ({install_r.tail()})")
 
 install_r = run(["mise", "install", f"ruff@{RUFF_V}"], env=ENV)
 if install_r.ok:

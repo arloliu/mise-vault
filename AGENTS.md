@@ -260,6 +260,15 @@ The operative rules:
   must be named explicitly, since `gcc` only recommends it rather than
   depending on it, and without it linking fails with a missing
   `crt1.o`/`crti.o` and C runtime libraries.
+- **An `npm install` through a proxy does not prove the proxy holds the
+  tarballs when the local npm cache is warm.**
+  Observed against the experiment stack:
+  seeding fetched every package document through the Nexus npm proxy
+  but served every tarball from the machine's own `~/.npm` cache,
+  leaving a proxy cache that looked seeded
+  and failed the first offline install with a 502 on the tarball path.
+  Cache warming must run npm with an isolated, empty cache directory
+  (`--cache <fresh dir>`) so every tarball really crosses the proxy.
 - **bun 1.3.14 honors `BUN_INSTALL_GLOBAL_DIR`/`BUN_INSTALL_BIN` placement
   and reads `~/.npmrc`'s registry.**
   Its manifest cache is keyed by registry host and revalidated,

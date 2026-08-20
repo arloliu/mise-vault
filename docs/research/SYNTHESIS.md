@@ -563,3 +563,25 @@ poc-test: 87/87.
 | D38 | **The test image installs bun via its official installer pinned to `/usr/local` (mirror-overridable `BUN_INSTALL_URL` build arg, same convention as uv/rustup), with `unzip` added explicitly because the installer unpacks a zip and the image uses `--no-install-recommends`.** bun 1.3.14 verified identical on host and image. |
 
 ---
+## 23. First scoped npm catalog tool — spectral (2026-08-20)
+
+The catalog gained its first real scoped npm package:
+tool `spectral`, package `@stoplight/spectral-cli`, version 6.16.3
+(latest stable on the npm registry at approval time).
+Scoped names (`@scope/name`) were already accepted
+by the package grammar, the schemas, and the validator
+— with fixtures proving the validation layer —
+but no catalog tool had ever exercised the shape end-to-end,
+so the encoded-slash registry path a scoped name produces
+(`@stoplight%2Fspectral-cli`)
+had never touched the install hook, the Nexus proxy,
+or the offline gate.
+poc-test: 96/96.
+
+| # | Decision |
+|---|---|
+| D39 | **Nexus CE's npm proxy serves the scoped-package metadata path (encoded slash) and its full dependency closure, verified empirically.** `GET /repository/npm-proxy/@stoplight%2Fspectral-cli` answers 200, and both the npm and bun runners install the package through the proxy; the offline gate proves the cached scoped document and tarballs serve with zero public internet. No plugin or provisioning change was needed — the existing npm-proxy repository covers scoped names as-is. |
+| D40 | **The scoped example deliberately reuses the existing npm tool record shape — no new catalog surface.** `tool.json` is just name `spectral`, type `npm`, package `@stoplight/spectral-cli`; `bin` stays defaulted (the package's own binary is `spectral`, matching the tool name). The end-to-end tests bind the scoped shape with a handful of checks (install and run via both runners, backend resolution, unapproved-version rejection) rather than repeating the full runner-mechanics battery, which the unscoped prettier cases already carry. |
+| D41 | **`seed-artifacts.sh`'s ecosystem cache warming became catalog-driven — one real install or download per approved version of every npm, pypi, and cargo catalog tool, each pulling its full dependency closure through the proxy.** The previous blocks hardcoded prettier, ruff, and tokei, so approving a new tool silently left a freshly seeded stack's proxy cache without it — caught in review when the offline spectral case was passing only against a cache warmed by earlier online suite runs, not by the documented seeding path. Catalog-driven warming means approving a new ecosystem tool never needs a matching seed-script edit, and the fix was proven by wiping the npm-proxy cache completely and re-running the seed before the offline gate. That reproduction surfaced a second latent trap: with the seeding machine's own `~/.npm` cache warm, `npm install` fetched the package documents through the proxy but served every tarball from local disk, leaving a cache that looked seeded and failed the first offline install with a 502 on the tarball path — the warming now runs npm against an isolated, empty cache directory so every tarball really crosses the proxy. |
+
+---

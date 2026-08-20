@@ -1,0 +1,5 @@
+{
+  "name": "spectral",
+  "type": "npm",
+  "package": "@stoplight/spectral-cli"
+}

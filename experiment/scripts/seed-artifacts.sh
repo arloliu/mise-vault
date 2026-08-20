@@ -150,62 +150,78 @@ while read -r v; do
 done < "$WORK/gocensus.versions"
 rm -rf "$GOWARM"
 
-# --- npm-proxy cache warming (npm-installed tools; catalog/prettier) -------
+# The three ecosystem warmings below are catalog-driven on purpose:
+# approving a new npm/pypi/cargo tool must never need a matching edit
+# here, or a fresh stack's offline gate quietly starts from a cache that
+# is missing that tool. This helper emits "<package> <version>" for every
+# approved version of every catalog tool of the given type (a cargo
+# record names its crate in the "crate" field, npm and pypi in "package").
+CATALOG_DIR="$(cd "$(dirname "$0")/../.." && pwd)/catalog"
+ecosystem_versions() { # type
+  python3 - "$CATALOG_DIR" "$1" <<'PY'
+import json, sys
+from pathlib import Path
+for tool_json in sorted(Path(sys.argv[1]).glob("*/tool.json")):
+    t = json.load(open(tool_json))
+    if t.get("type") == sys.argv[2]:
+        pkg = t["crate"] if sys.argv[2] == "cargo" else t["package"]
+        for rec in json.load(open(tool_json.parent / "versions.json")):
+            print(pkg, rec["version"])
+PY
+}
+
+# --- npm-proxy cache warming (every npm-type catalog tool) -----------------
 # Same philosophy as the go-proxy warming above: an npm tool has no Nexus
 # artifact to upload, its content is the npm proxy repository's cache of the
-# real package document + tarball, fetched straight from registry.npmjs.org
-# through Nexus. Warming here means a later offline run finds every approved
-# version already cached. prettier has zero runtime dependencies (the
-# selection guideline in the design doc), so one real "npm install" pulls
-# the whole closure: the package document plus its one tarball.
-log "warming the npm-proxy cache for catalog/prettier"
-python3 - "$(cd "$(dirname "$0")/../.." && pwd)/catalog/prettier/versions.json" <<'PY' > "$WORK/prettier.versions"
-import json, sys
-for rec in json.load(open(sys.argv[1])):
-    print(rec["version"])
-PY
+# real package document + tarballs, fetched straight from registry.npmjs.org
+# through Nexus. A real "npm install" per approved version pulls the whole
+# closure — a single tarball for a dependency-free package like prettier,
+# the full dependency tree for a scoped tool like @stoplight/spectral-cli.
+# The install runs against an isolated, empty npm cache: with the machine's
+# own ~/.npm cache warm, npm serves tarballs from disk and never asks the
+# proxy for them, so the proxy ends up holding the package documents but
+# none of the tarballs — a cache that looks seeded and fails the first
+# offline install (observed exactly that way against this stack).
+log "warming the npm-proxy cache for every npm-type catalog tool"
+ecosystem_versions npm > "$WORK/npm.versions"
 NPM_WARM=$(mktemp -d)
-while read -r v; do
+while read -r pkg v; do
   if NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false \
-     npm install -g --prefix "$NPM_WARM/prefix" \
-       --registry "$NEXUS_URL/repository/npm-proxy/" "prettier@$v" >/dev/null 2>&1; then
-    log "prettier $v (package document + tarball) cached at npm-proxy"
+     npm install -g --prefix "$NPM_WARM/prefix" --cache "$NPM_WARM/cache" \
+       --registry "$NEXUS_URL/repository/npm-proxy/" "$pkg@$v" >/dev/null 2>&1; then
+    log "$pkg $v (package document + dependency closure) cached at npm-proxy"
   else
-    echo "ERROR: could not warm npm-proxy cache for prettier $v" >&2
+    echo "ERROR: could not warm npm-proxy cache for $pkg $v" >&2
     exit 1
   fi
-  rm -rf "$NPM_WARM/prefix"
-done < "$WORK/prettier.versions"
+  rm -rf "$NPM_WARM/prefix" "$NPM_WARM/cache"
+done < "$WORK/npm.versions"
 rm -rf "$NPM_WARM"
 
-# --- pypi-proxy cache warming (pypi-installed tools; catalog/ruff) ---------
-# ruff installs as one dependency-free prebuilt wheel per platform (the
-# selection guideline in the design doc), so a real "pip download" against
-# the proxy — same philosophy as the go closure and npm warming above —
-# pulls both the simple-API page and the one wheel matching this machine's
-# platform, with nothing else to close over.
-log "warming the pypi-proxy cache for catalog/ruff"
-python3 - "$(cd "$(dirname "$0")/../.." && pwd)/catalog/ruff/versions.json" <<'PY' > "$WORK/ruff.versions"
-import json, sys
-for rec in json.load(open(sys.argv[1])):
-    print(rec["version"])
-PY
+# --- pypi-proxy cache warming (every pypi-type catalog tool) ---------------
+# A real "pip download" per approved version against the proxy — same
+# philosophy as the go closure and npm warming above — pulls the simple-API
+# page, the wheel matching this machine's platform, and the package's
+# dependency closure (nothing extra for a dependency-free wheel like ruff;
+# the whole tree for a package that has one).
+log "warming the pypi-proxy cache for every pypi-type catalog tool"
+ecosystem_versions pypi > "$WORK/pypi.versions"
 PYPI_WARM=$(mktemp -d)
-while read -r v; do
-  if python3 -m pip download --no-deps --no-cache-dir \
+while read -r pkg v; do
+  if python3 -m pip download --no-cache-dir \
        --index-url "$NEXUS_URL/repository/pypi-proxy/simple" \
        --trusted-host "$(python3 -c "import urllib.parse,sys; print(urllib.parse.urlparse(sys.argv[1]).hostname)" "$NEXUS_URL")" \
-       -d "$PYPI_WARM/dl" "ruff==$v" >/dev/null 2>&1; then
-    log "ruff $v (simple-API page + wheel) cached at pypi-proxy"
+       -d "$PYPI_WARM/dl" "$pkg==$v" >/dev/null 2>&1; then
+    log "$pkg $v (simple-API page + wheel + dependency closure) cached at pypi-proxy"
   else
-    echo "ERROR: could not warm pypi-proxy cache for ruff $v" >&2
+    echo "ERROR: could not warm pypi-proxy cache for $pkg $v" >&2
     exit 1
   fi
   rm -rf "$PYPI_WARM/dl"
-done < "$WORK/ruff.versions"
+done < "$WORK/pypi.versions"
 rm -rf "$PYPI_WARM"
 
-# --- cargo-proxy cache warming (cargo-installed tools; catalog/tokei) ------
+# --- cargo-proxy cache warming (every cargo-type catalog tool) -------------
 # Same philosophy as the go-proxy/npm-proxy/pypi-proxy warming above: a
 # cargo tool has no Nexus artifact to upload, its content is the cargo proxy
 # repository's cache of the sparse index plus the crate tarballs it proxies,
@@ -215,12 +231,8 @@ rm -rf "$PYPI_WARM"
 # proxy, from a scratch CARGO_HOME that source-replaces crates-io with the
 # Nexus cargo proxy, is the only reliable way to pull the full closure
 # through — mirroring the go-proxy warming's reasoning exactly.
-log "warming the cargo-proxy cache for catalog/tokei"
-python3 - "$(cd "$(dirname "$0")/../.." && pwd)/catalog/tokei/versions.json" <<'PY' > "$WORK/tokei.versions"
-import json, sys
-for rec in json.load(open(sys.argv[1])):
-    print(rec["version"])
-PY
+log "warming the cargo-proxy cache for every cargo-type catalog tool"
+ecosystem_versions cargo > "$WORK/cargo.versions"
 command -v cargo >/dev/null 2>&1 || {
   echo "ERROR: warming the cargo-proxy cache needs a Rust toolchain (cargo) on PATH" >&2
   exit 1
@@ -234,18 +246,18 @@ replace-with = "nexus-cargo"
 [registries.nexus-cargo]
 index = "sparse+$NEXUS_URL/repository/cargo-proxy/"
 EOF
-while read -r v; do
+while read -r crate v; do
   # RUSTUP_AUTO_INSTALL=0 mirrors the plugin's own pin: a rustup-provided
   # cargo must never reach for a toolchain download while seeding.
   if RUSTUP_AUTO_INSTALL=0 CARGO_HOME="$CARGO_WARM/home" CARGO_NET_RETRY=1 \
-     cargo install tokei --version "$v" --locked --root "$CARGO_WARM/install" >/dev/null 2>&1; then
-    log "tokei $v and its full dependency closure cached at cargo-proxy"
+     cargo install "$crate" --version "$v" --locked --root "$CARGO_WARM/install" >/dev/null 2>&1; then
+    log "$crate $v and its full dependency closure cached at cargo-proxy"
   else
-    echo "ERROR: could not warm cargo-proxy cache for tokei $v" >&2
+    echo "ERROR: could not warm cargo-proxy cache for $crate $v" >&2
     exit 1
   fi
   rm -rf "$CARGO_WARM/install"
-done < "$WORK/tokei.versions"
+done < "$WORK/cargo.versions"
 rm -rf "$CARGO_WARM"
 
 log "seed complete; manifest:"
